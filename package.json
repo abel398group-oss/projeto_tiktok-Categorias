@@ -1,0 +1,22 @@
+{
+  "name": "tiktok-shop-scraper",
+  "version": "1.0.0",
+  "description": "Scraper TikTok Shop com interceptação de rede e upsert em CSV",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
+    "puppeteer": "^23.11.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
