@@ -16,8 +16,9 @@ export class NetworkSniffer {
   /**
    * @param {import('puppeteer').Page} page
    * @param {string[]} urlIncludes
+   * @param {{ debug?: boolean; onDebugSample?: (e: Record<string, unknown>) => void; debugLogBudget?: number }} [opts]
    */
-  constructor(page, urlIncludes) {
+  constructor(page, urlIncludes, opts = {}) {
     this.page = page;
     this.urlIncludes = urlIncludes;
     this.buffer = [];
@@ -26,6 +27,10 @@ export class NetworkSniffer {
     this._attached = false;
     /** @type {string} */
     this.categoriaPaiAtual = '';
+    this._debug = Boolean(opts.debug);
+    this._onDebugSample = typeof opts.onDebugSample === 'function' ? opts.onDebugSample : null;
+    this._debugLogBudget = Number.isFinite(opts.debugLogBudget) ? opts.debugLogBudget : 120;
+    this._debugLogsEmitted = 0;
   }
 
   attach() {
@@ -91,8 +96,27 @@ export class NetworkSniffer {
       const extracted = extractProductsFromJson(json, []);
       if (!extracted.length) return;
 
+      if (this._debug) {
+        if (this._debugLogsEmitted < this._debugLogBudget) {
+          this._debugLogsEmitted += 1;
+          console.error(
+            `[sniffer-debug] #${this._debugLogsEmitted} status=${status} raw=${extracted.length} ${url.slice(0, 180)}`
+          );
+        }
+      }
+
       const cat = this.categoriaPaiAtual || '';
       const normalized = extracted.map((e) => normalizeProduct(e.raw, cat)).filter(Boolean);
+
+      if (this._onDebugSample) {
+        this._onDebugSample({
+          t: new Date().toISOString(),
+          status,
+          url: url.slice(0, 400),
+          extracted: extracted.length,
+          normalized: normalized.length,
+        });
+      }
 
       for (const n of normalized) {
         const id = n.sku;

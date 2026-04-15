@@ -1,7 +1,7 @@
 {
   "name": "tiktok-shop-scraper",
   "version": "1.0.0",
-  "description": "Scraper TikTok Shop com interceptação de rede e upsert em CSV",
+  "description": "Scraper TikTok Shop: SSR + rede + PDP, produtos.json canónico e CSV legado",
   "type": "module",
   "main": "src/index.js",
   "scripts": {

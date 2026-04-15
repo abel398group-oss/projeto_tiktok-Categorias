@@ -5,6 +5,22 @@ function asString(v) {
   return String(v).trim();
 }
 
+/** Número de venda > 0 (aceita string formatada tipo R$ 37,12). Ignora NaN, <= 0. */
+function parsePositivePrice(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v > 0 ? v : null;
+  if (typeof v === 'bigint') {
+    const x = Number(v);
+    return x > 0 && Number.isFinite(x) ? x : null;
+  }
+  const s = String(v).trim();
+  if (!s) return null;
+  const cleaned = s.replace(/[^\d.,]/g, '').replace(',', '.');
+  const n = parseFloat(cleaned);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
 /** Unifica nós comuns: item.product, componente com product embutido. */
 function unwrapProductNode(obj) {
   if (!obj || typeof obj !== 'object') return obj;
@@ -27,60 +43,140 @@ function getProductBase(obj) {
   return o.product_base || o.productBase || null;
 }
 
-/** Preço promocional / atual (evita confundir com preço original). */
+/**
+ * Preço de venda atual (PDP/listagem): prioridade fixa — desconto/promo primeiro; nunca max_price como principal.
+ * 1) discount_price / sale_price (incl. decimais e formatos de promo)
+ * 2) price_current explícito
+ * 3) price / current_price / blocos equivalentes (sem max)
+ * 4) min_price.* (apenas campos de venda dentro do objeto min)
+ */
 function pickPrecoAtual(obj) {
   if (!obj || typeof obj !== 'object') return '';
 
-  const ppi = getProductPriceInfo(obj);
-  if (ppi && typeof ppi === 'object') {
-    const formatted =
-      ppi.sale_price_format ||
-      ppi.sale_price_integer_part_format ||
-      ppi.price_text ||
-      ppi.show_price ||
-      ppi.format_price;
-    if (formatted != null && String(formatted).trim()) return asString(formatted);
+  const node = unwrapProductNode(obj);
+  const ppi = getProductPriceInfo(node);
+  const pb = getProductBase(node);
+  const priceBlock = pb?.price && typeof pb.price === 'object' ? pb.price : null;
+  const pi = node.price_info || node.priceInfo;
 
-    const sym = ppi.currency_symbol || ppi.currency || '';
-    const dec = ppi.sale_price_decimal ?? ppi.min_price_decimal ?? ppi.price_val;
-    if (dec != null && String(dec).trim()) {
-      const joined = [sym, dec].filter(Boolean).join(sym && !String(sym).endsWith(' ') ? ' ' : '');
-      if (joined.trim()) return joined.trim();
+  /** @type {Record<string, unknown>} */
+  const extracted_prices = {
+    price: ppi?.price ?? node.price,
+    min_price: ppi?.min_price ?? ppi?.minPrice,
+    max_price: ppi?.max_price ?? ppi?.maxPrice ?? node.max_price ?? node.maxPrice,
+    sale_price: ppi?.sale_price ?? ppi?.sale_price_decimal ?? node.sale_price,
+    discount_price: ppi?.discount_price ?? ppi?.discount_price_decimal ?? node.discount_price,
+    price_current: ppi?.price_current ?? node.price_current,
+    price_val: ppi?.price_val,
+  };
+
+  /** @type {Array<[() => number | null, string]>} */
+  const tries = [
+    // 1 — promo / venda
+    [() => parsePositivePrice(ppi?.discount_price_decimal), 'ppi.discount_price_decimal'],
+    [() => parsePositivePrice(ppi?.discount_price), 'ppi.discount_price'],
+    [() => parsePositivePrice(ppi?.sale_price_decimal), 'ppi.sale_price_decimal'],
+    [() => parsePositivePrice(ppi?.sale_price), 'ppi.sale_price'],
+    [() => parsePositivePrice(node.discount_price), 'node.discount_price'],
+    [() => parsePositivePrice(node.sale_price), 'node.sale_price'],
+    [() => parsePositivePrice(node.min_sale_price), 'node.min_sale_price'],
+    [() => parsePositivePrice(node.real_time_price ?? ppi?.real_time_price), 'real_time_price'],
+    [() => parsePositivePrice(priceBlock?.discount_price), 'product_base.price.discount_price'],
+    [() => parsePositivePrice(priceBlock?.sale_price), 'product_base.price.sale_price'],
+    [() => parsePositivePrice(priceBlock?.real_price), 'product_base.price.real_price'],
+    [() => parsePositivePrice(ppi?.sale_price_format), 'ppi.sale_price_format'],
+    [() => parsePositivePrice(ppi?.sale_price_integer_part_format), 'ppi.sale_price_integer_part_format'],
+    [() => parsePositivePrice(node.format_discount_price ?? node.discount_price_format), 'node.discount_price_format'],
+    [() => parsePositivePrice(ppi?.format_discount_price), 'ppi.format_discount_price'],
+    // 2 — price_current
+    [() => parsePositivePrice(ppi?.price_current), 'ppi.price_current'],
+    [() => parsePositivePrice(node.price_current), 'node.price_current'],
+    // 3 — price genérico (nunca max_price)
+    [() => parsePositivePrice(node.price), 'node.price'],
+    [() => parsePositivePrice(node.current_price), 'node.current_price'],
+    [() => parsePositivePrice(node.display_price), 'node.display_price'],
+    [() => parsePositivePrice(priceBlock?.current_price), 'product_base.price.current_price'],
+    [
+      () =>
+        pi && typeof pi === 'object'
+          ? parsePositivePrice(pi.min_sale_price ?? pi.sale_price)
+          : null,
+      'price_info.min_sale_price|sale_price',
+    ],
+    [
+      () => {
+        if (!pi || typeof pi !== 'object') return null;
+        const pr = pi.price;
+        if (pr != null && typeof pr !== 'object') return parsePositivePrice(pr);
+        return null;
+      },
+      'price_info.price',
+    ],
+    [() => parsePositivePrice(node.format_price ?? node.formatted_price ?? node.formattedPrice), 'node.formatted_price'],
+    // 4 — objeto min_price (só subcampos de venda)
+    [
+      () => {
+        const min = ppi?.min_price ?? ppi?.minPrice;
+        if (!min || typeof min !== 'object') return null;
+        const m = /** @type {Record<string, unknown>} */ (min);
+        return (
+          parsePositivePrice(m.sale_price_decimal) ??
+          parsePositivePrice(m.single_product_price_decimal) ??
+          parsePositivePrice(m.min_sale_price) ??
+          parsePositivePrice(m.price_val)
+        );
+      },
+      'ppi.min_price.(sale|single|min_sale|price_val)',
+    ],
+    [() => parsePositivePrice(priceBlock?.min_sku_price), 'product_base.price.min_sku_price'],
+    // Fallback formatado (último recurso; ainda sem max_price)
+    [() => parsePositivePrice(ppi?.price_text), 'ppi.price_text'],
+    [() => parsePositivePrice(ppi?.show_price), 'ppi.show_price'],
+    [() => parsePositivePrice(ppi?.format_price), 'ppi.format_price'],
+  ];
+
+  let chosenNum = /** @type {number | null} */ (null);
+  let chosenSource = '';
+  for (const [fn, label] of tries) {
+    const n = fn();
+    if (n != null) {
+      chosenNum = n;
+      chosenSource = label;
+      break;
     }
   }
 
-  const pb = getProductBase(obj);
-  const priceBlock = pb?.price;
-  if (priceBlock && typeof priceBlock === 'object') {
-    const rp = priceBlock.real_price || priceBlock.min_sku_price || priceBlock.current_price;
-    if (rp != null) return asString(rp);
-  }
-
-  const direct =
-    obj.format_discount_price ??
-    obj.discount_price_format ??
-    obj.min_sale_price ??
-    obj.sale_price ??
-    obj.price ??
-    obj.current_price ??
-    obj.display_price;
-  if (direct !== undefined && direct !== null) return asString(direct);
-
-  const pi = obj.price_info || obj.priceInfo;
-  if (pi && typeof pi === 'object') {
+  if (chosenNum == null && pi && typeof pi === 'object') {
     const min = pi.min_price ?? pi.minPrice ?? pi.price;
     if (min && typeof min === 'object') {
-      return asString(
-        min.formatted_price ?? min.formattedPrice ?? min.price_str ?? min.amount ?? min.value ?? ''
-      );
+      const s =
+        min.formatted_price ?? min.formattedPrice ?? min.price_str ?? min.amount ?? min.value;
+      chosenNum = parsePositivePrice(s);
+      if (chosenNum != null) chosenSource = 'price_info.min.formatted';
     }
-    return asString(pi.min_sale_price ?? pi.sale_price ?? '');
   }
 
-  const fmt = obj.format_price ?? obj.formatted_price ?? obj.formattedPrice;
-  if (fmt) return asString(fmt);
+  const chosenStr = chosenNum != null ? String(chosenNum) : '';
 
-  return '';
+  if (
+    process.env.DEBUG_PRICE_EXTRACTION === 'true' ||
+    process.env.DEBUG_PRICE_EXTRACTION === '1'
+  ) {
+    console.log(
+      JSON.stringify(
+        {
+          product_id: pickId(obj),
+          extracted_prices,
+          chosen_price: chosenStr,
+          chosen_source: chosenSource,
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  return chosenStr;
 }
 
 /** Preço “De” / tachado / original. */
@@ -176,26 +272,40 @@ function expandCdnUrl(maybe) {
 
 /** URL da imagem principal / capa. */
 function pickImage(obj) {
-  if (!obj || typeof obj !== 'object') return '';
+  const list = pickImagesList(obj);
+  return list[0] || '';
+}
+
+/** Todas as URLs de imagem (listagem / API). */
+function pickImagesList(obj) {
+  if (!obj || typeof obj !== 'object') return [];
   const o = unwrapProductNode(obj);
+  /** @type {string[]} */
+  const out = [];
+  const add = (u) => {
+    const s = expandCdnUrl(asString(u));
+    if (s && !out.includes(s)) out.push(s);
+  };
 
   const img = o.image || o.cover || o.main_image || o.mainImage || o.pic;
   if (img && typeof img === 'object') {
     const list = img.url_list || img.urlList || img.urls;
-    if (Array.isArray(list) && list[0]) return expandCdnUrl(list[0]);
-    if (img.url) return expandCdnUrl(img.url);
-    if (img.uri) return expandCdnUrl(img.uri);
+    if (Array.isArray(list)) for (const u of list) add(u);
+    if (img.url) add(img.url);
+    if (img.uri) add(img.uri);
+  } else if (typeof img === 'string') {
+    add(img);
   }
-  if (typeof img === 'string') return expandCdnUrl(img);
 
   const imgs = o.images || o.image_list;
-  if (Array.isArray(imgs) && imgs[0]) {
-    const first = imgs[0];
-    if (typeof first === 'string') return expandCdnUrl(first);
-    if (first?.url_list?.[0]) return expandCdnUrl(first.url_list[0]);
+  if (Array.isArray(imgs)) {
+    for (const first of imgs) {
+      if (typeof first === 'string') add(first);
+      else if (first?.url_list?.[0]) add(first.url_list[0]);
+    }
   }
 
-  return '';
+  return out;
 }
 
 function pickTitle(obj) {
@@ -214,9 +324,54 @@ function pickId(obj) {
     obj.productId ??
     o.item_id ??
     o.itemId ??
-    o.id ??
-    o.sku;
+    o.id;
   return asString(id);
+}
+
+/**
+ * Espelha a ordem de `pickId` (??) só para debug — não altera extração.
+ * @returns {{ field: string }}
+ */
+function inspectPickIdFieldUsed(obj) {
+  if (!obj || typeof obj !== 'object') return { field: 'none' };
+  const o = unwrapProductNode(obj);
+  /** @type {[string, unknown][]} */
+  const checks = [
+    ['product_id', o.product_id],
+    ['productId', o.productId],
+    ['obj.product_id', obj.product_id],
+    ['obj.productId', obj.productId],
+    ['item_id', o.item_id],
+    ['itemId', o.itemId],
+    ['id', o.id],
+  ];
+  for (const [field, val] of checks) {
+    if (val !== undefined && val !== null) return { field };
+  }
+  return { field: 'none' };
+}
+
+/** DFS: existe `product_id` ou `productId` não vazio em qualquer nível de `raw`. */
+function treeHasProductIdAnywhere(value, depth = 0) {
+  if (depth > 20 || value == null) return false;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (treeHasProductIdAnywhere(item, depth + 1)) return true;
+    }
+    return false;
+  }
+  if (typeof value !== 'object') return false;
+  for (const key of ['product_id', 'productId']) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      const v = /** @type {Record<string, unknown>} */ (value)[key];
+      if (v != null && String(v).trim() !== '') return true;
+    }
+  }
+  for (const k of Object.keys(value)) {
+    if (treeHasProductIdAnywhere(/** @type {Record<string, unknown>} */ (value)[k], depth + 1))
+      return true;
+  }
+  return false;
 }
 
 function expandProductUrl(maybePath, productId) {
@@ -299,10 +454,39 @@ export function isProductLike(o) {
 export function normalizeProduct(raw, taxonomia) {
   const node = raw?.product && typeof raw.product === 'object' ? { ...raw, ...raw.product } : raw;
   const sku = pickId(node);
+
+  if (
+    process.env.DEBUG_NETWORK_PICK_ID === 'true' ||
+    process.env.DEBUG_NETWORK_PICK_ID === '1'
+  ) {
+    const { field } = inspectPickIdFieldUsed(node);
+    console.log(
+      JSON.stringify(
+        {
+          chosen_id: sku,
+          field_used: field,
+          has_product_id_anywhere: raw != null && typeof raw === 'object' ? treeHasProductIdAnywhere(raw) : false,
+        },
+        null,
+        2
+      )
+    );
+  }
+
   if (!sku) return null;
 
-  return {
+  const imgs = pickImagesList(node);
+  const mainImg = imgs[0] || pickImage(node);
+  const ppi = getProductPriceInfo(node);
+  const skuId =
+    ppi && typeof ppi === 'object'
+      ? String(ppi.sku_id ?? ppi.skuId ?? sku)
+      : sku;
+
+  /** @type {Record<string, unknown>} */
+  const row = {
     sku,
+    sku_id: skuId,
     nome: pickTitle(node),
     preco_atual: pickPrecoAtual(node),
     preco_original: pickPrecoOriginal(node),
@@ -310,9 +494,17 @@ export function normalizeProduct(raw, taxonomia) {
     total_vendas: pickSold(node),
     taxonomia: taxonomia || '',
     link_do_produto: pickLink(node, sku),
-    link_imagem: pickImage(node),
+    link_imagem: mainImg,
+    images: imgs,
     data_coleta: '',
   };
+
+  if (ppi && typeof ppi === 'object' && ppi.discount != null) {
+    const d = Number(ppi.discount);
+    if (Number.isFinite(d) && d > 0) row.discount = String(d);
+  }
+
+  return row;
 }
 
 export function extractProductsFromJson(value, out = []) {

@@ -62,8 +62,8 @@ function cellToPlainString(cell) {
  */
 export class DataStore {
   /**
-   * @param {string} filePath caminho .csv ou .xlsx
-   * @param {'csv' | 'xlsx'} format
+   * @param {string} filePath caminho .json, .csv ou .xlsx
+   * @param {'json' | 'csv' | 'xlsx'} format
    */
   constructor(filePath, format) {
     this.filePath = filePath;
@@ -77,7 +77,7 @@ export class DataStore {
    */
   static async create(filePath) {
     const ext = path.extname(filePath).toLowerCase();
-    const format = ext === '.xlsx' ? 'xlsx' : 'csv';
+    const format = ext === '.xlsx' ? 'xlsx' : ext === '.json' ? 'json' : 'csv';
     const store = new DataStore(filePath, format);
     await store.load();
     return store;
@@ -90,7 +90,24 @@ export class DataStore {
     if (!fs.existsSync(this.filePath)) return;
 
     if (this.format === 'xlsx') await this._loadXlsx();
+    else if (this.format === 'json') this._loadJson();
     else this._loadCsv();
+  }
+
+  _loadJson() {
+    try {
+      const raw = fs.readFileSync(this.filePath, 'utf8');
+      if (!raw.trim()) return;
+      const data = JSON.parse(raw);
+      const items = data.items && typeof data.items === 'object' ? data.items : {};
+      for (const row of Object.values(items)) {
+        const r = normalizeLoadedRow(row);
+        if (!r.sku) continue;
+        this.bySku.set(r.sku, r);
+      }
+    } catch {
+      /* ficheiro inválido ou vazio */
+    }
   }
 
   _loadCsv() {
@@ -213,7 +230,23 @@ export class DataStore {
 
   async writeAll() {
     if (this.format === 'xlsx') await this._writeXlsx();
+    else if (this.format === 'json') await this._writeJson();
     else await this._writeCsv();
+  }
+
+  async _writeJson() {
+    const records = Array.from(this.bySku.values()).sort((a, b) => a.sku.localeCompare(b.sku));
+    const items = {};
+    for (const r of records) items[r.sku] = { ...r };
+    const payload = {
+      meta: {
+        version: 1,
+        updated_at: new Date().toISOString(),
+        count: records.length,
+      },
+      items,
+    };
+    await fs.promises.writeFile(this.filePath, JSON.stringify(payload, null, 2), 'utf8');
   }
 
   async _writeCsv() {

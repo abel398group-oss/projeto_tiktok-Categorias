@@ -1,14 +1,14 @@
-import { sleep, randomBetween } from './util.js';
+import { sleep } from './util.js';
+
+const PDP_LINK_SEL = 'a[href*="/pdp/"], a[href*="/br/pdp/"], a[href*="/view/product"]';
 
 /**
  * @param {import('puppeteer').Page} page
  */
 export async function collectPdpLinks(page) {
-  const hrefs = await page.evaluate(() => {
+  const hrefs = await page.evaluate((sel) => {
     const out = new Set();
-    for (const a of document.querySelectorAll(
-      'a[href*="/pdp/"], a[href*="/br/pdp/"], a[href*="/view/product"]'
-    )) {
+    for (const a of document.querySelectorAll(sel)) {
       try {
         const abs = new URL(a.getAttribute('href') || '', location.href).href;
         const u = new URL(abs);
@@ -21,8 +21,43 @@ export async function collectPdpLinks(page) {
       }
     }
     return Array.from(out);
-  });
+  }, PDP_LINK_SEL);
   return [...new Set(hrefs)].sort();
+}
+
+/**
+ * @param {import('puppeteer').Page} page
+ */
+async function countPdpLinks(page) {
+  return page.evaluate((sel) => {
+    const out = new Set();
+    for (const a of document.querySelectorAll(sel)) {
+      try {
+        const abs = new URL(a.getAttribute('href') || '', location.href).href;
+        const u = new URL(abs);
+        const p = u.pathname.toLowerCase();
+        if (p.includes('/pdp/') || p.includes('/br/pdp/') || p.includes('/view/product')) {
+          out.add(u.href.split('#')[0]);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return out.size;
+  }, PDP_LINK_SEL);
+}
+
+/**
+ * Scroll ao fundo e dá um tick de layout (sem “smooth”, que atrasa o botão).
+ * @param {import('puppeteer').Page} page
+ */
+async function scrollListingBottomForMoreButton(page) {
+  await page.evaluate(() => {
+    window.scrollTo({ left: 0, top: document.documentElement.scrollHeight, behavior: 'auto' });
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+  });
 }
 
 /**
@@ -59,7 +94,7 @@ export async function scrollListingToLoadProducts(page, opts = {}) {
     await page.evaluate(() => {
       window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
     });
-    await sleep(randomBetween(500, 1200));
+    await sleep(450);
 
     if (h <= lastH) idle += 1;
     else idle = 0;
@@ -70,25 +105,32 @@ export async function scrollListingToLoadProducts(page, opts = {}) {
 
 /**
  * Clica em "View more" / "Ver mais" até sumir ou parar de crescer a lista.
+ * Usa espera por crescimento de links PDP (rápido) em vez de network idle + sleep longo.
  * @param {import('puppeteer').Page} page
- * @param {{ maxClicks: number, settleMs: number, noGrowthLimit: number }} opts
+ * @param {{
+ *   maxClicks: number,
+ *   settleMs?: number,
+ *   noGrowthLimit: number,
+ *   growWaitMs?: number,
+ *   growPollMs?: number,
+ *   preClickDelayMs?: number,
+ * }} opts
  */
 export async function expandViewMoreUntilDone(page, opts) {
   const maxClicks = opts.maxClicks ?? 200;
-  const settleMs = opts.settleMs ?? 2500;
+  /** Fallback curto se o contador de PDP não subir a tempo (ex.: lazy render). */
+  const settleMs = opts.settleMs ?? 700;
   const noGrowthLimit = opts.noGrowthLimit ?? 4;
+  const growWaitMs = opts.growWaitMs ?? 12_000;
+  const growPollMs = opts.growPollMs ?? 120;
+  const preClickDelayMs = opts.preClickDelayMs ?? 90;
 
   let noGrowth = 0;
-  let lastCount = (await collectPdpLinks(page)).length;
+  let lastCount = await countPdpLinks(page);
 
   for (let i = 0; i < maxClicks; i += 1) {
-    await page
-      .evaluate(() => {
-        window.scrollTo(0, document.documentElement.scrollHeight);
-      })
-      .catch(() => {});
-
-    await sleep(randomBetween(400, 900));
+    await scrollListingBottomForMoreButton(page).catch(() => {});
+    if (preClickDelayMs > 0) await sleep(preClickDelayMs);
 
     const label = await page.evaluate(() => {
       const rx =
@@ -103,9 +145,14 @@ export async function expandViewMoreUntilDone(page, opts) {
         if (!rx.test(firstLine) && !rx.test(raw)) continue;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
         const st = window.getComputedStyle(el);
-        if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
+        if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) < 0.05) continue;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) continue;
+        try {
+          el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        } catch {
+          el.scrollIntoView(true);
+        }
         el.click();
         return firstLine.slice(0, 80);
       }
@@ -115,14 +162,38 @@ export async function expandViewMoreUntilDone(page, opts) {
     if (!label) {
       noGrowth += 1;
       if (noGrowth >= noGrowthLimit) break;
-      await sleep(600);
+      await sleep(320);
       continue;
     }
 
-    await sleep(settleMs);
-    await page.waitForNetworkIdle({ idleTime: 500, timeout: 25_000 }).catch(() => {});
+    const grew = await page
+      .waitForFunction(
+        (prev, sel) => {
+          const out = new Set();
+          for (const a of document.querySelectorAll(sel)) {
+            try {
+              const abs = new URL(a.getAttribute('href') || '', location.href).href;
+              const u = new URL(abs);
+              const p = u.pathname.toLowerCase();
+              if (p.includes('/pdp/') || p.includes('/br/pdp/') || p.includes('/view/product')) {
+                out.add(u.href.split('#')[0]);
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          return out.size > prev;
+        },
+        { timeout: growWaitMs, polling: growPollMs },
+        lastCount,
+        PDP_LINK_SEL
+      )
+      .then(() => true)
+      .catch(() => false);
 
-    const n = (await collectPdpLinks(page)).length;
+    if (!grew) await sleep(settleMs);
+
+    const n = await countPdpLinks(page);
     if (n <= lastCount) noGrowth += 1;
     else noGrowth = 0;
     lastCount = n;
