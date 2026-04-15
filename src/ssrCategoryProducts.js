@@ -22,7 +22,7 @@ export async function extractSsrListingRows(page) {
     /** @type {Array<Record<string, unknown>>} */
     const out = [];
 
-    /** Alinhado a productExtract: promo primeiro, price_current, price, depois min.* — nunca max_price. */
+    /** min_price primeiro (alinhamento PDP), depois promo/top-level, depois texto — nunca max_price. */
     function priceFromPpi(ppi) {
       if (!ppi || typeof ppi !== 'object') return '';
       function num(v) {
@@ -36,16 +36,7 @@ export async function extractSsrListingRows(page) {
         return n != null ? String(n) : '';
       }
       const p = /** @type {Record<string, unknown>} */ (ppi);
-      let n =
-        num(p.discount_price_decimal) ||
-        num(p.discount_price) ||
-        num(p.sale_price_decimal) ||
-        num(p.sale_price);
-      if (n) return pick(n);
-      n = num(p.price_current);
-      if (n) return pick(n);
-      n = num(p.price);
-      if (n) return pick(n);
+      let n;
       const min = p.min_price ?? p.minPrice;
       if (min && typeof min === 'object') {
         const m = /** @type {Record<string, unknown>} */ (min);
@@ -56,6 +47,16 @@ export async function extractSsrListingRows(page) {
           num(m.price_val);
         if (n) return pick(n);
       }
+      n =
+        num(p.discount_price_decimal) ||
+        num(p.discount_price) ||
+        num(p.sale_price_decimal) ||
+        num(p.sale_price);
+      if (n) return pick(n);
+      n = num(p.price_current);
+      if (n) return pick(n);
+      n = num(p.price);
+      if (n) return pick(n);
       n = num(p.sale_price_format) || num(p.price_text);
       return pick(n);
     }
