@@ -1,8 +1,12 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
+import { createPgPool } from './db/postgres.js';
+import { RawEventStore } from './telemetry/rawEventStore.js';
+import { RawEventWriteBuffer } from './telemetry/rawEventBuffer.js';
 import { RunMetrics, flushRunArtifacts } from './runMetrics.js';
 import { launchBrowser } from './browser.js';
-import { NetworkSniffer } from './networkSniffer.js';
+import { NetworkSniffer } from './sniffers/networkSniffer.js';
 import { CanonicalJsonStore } from './canonicalJsonStore.js';
 import { findCategoryUrlByName } from './categoryNav.js';
 import { collectCategoryUrlsFromSitemapPage } from './sitemap.js';
@@ -16,6 +20,22 @@ import {
 import { scrapeProductDetail } from './pdpScrape.js';
 import { extractSsrListingRows } from './ssrCategoryProducts.js';
 import { sleep, randomBetween } from './util.js';
+
+/** Resumo seguro de DATABASE_URL para logs (sem password). */
+function pgConnectionHint(connectionString) {
+  try {
+    const u = new URL(connectionString);
+    const db = (u.pathname || '/').replace(/^\//, '') || 'postgres';
+    return `${u.hostname}:${u.port || '5432'}/${db}`;
+  } catch {
+    return '(URL inválida — verifique DATABASE_URL)';
+  }
+}
+
+/** Mascara password na URL (postgres://user:secret@host → postgres://user:***@host). */
+function maskDatabaseUrlForLog(urlStr) {
+  return String(urlStr).replace(/:\/\/([^:/?#]+):([^@/?#]+)@/i, '://$1:***@');
+}
 
 /** @param {import('./canonicalJsonStore.js').CanonicalJsonStore} store */
 function isProductCapReached(store) {
@@ -450,6 +470,51 @@ async function main() {
     `[run] duração máxima: ${runDurationMs / 60_000} min (RUN_DURATION_MINUTES, omitir = 2)`
   );
 
+  /** @type {import('pg').Pool | null} */
+  let pgPool = null;
+  /** @type {RawEventStore | null} */
+  let rawEventStore = null;
+  /** @type {RawEventWriteBuffer | null} */
+  let rawEventBuffer = null;
+  const rawEventExtractorVersion = 'productExtract@v1';
+  const databaseUrl = String(process.env.DATABASE_URL || '').trim();
+  if (databaseUrl) {
+    try {
+      const dbUrl = databaseUrl;
+      console.info(
+        '[env] dotenv: variável DATABASE_URL presente em process.env (ficheiro .env carregado via src/config.js).'
+      );
+      console.info(`[db] DATABASE_URL (mascarada): ${maskDatabaseUrlForLog(dbUrl)}`);
+      console.info(`[db] destino resolvido: ${pgConnectionHint(dbUrl)}`);
+      pgPool = createPgPool(dbUrl);
+      await pgPool.query('SELECT 1 AS ok');
+      console.info('[db] conexão PostgreSQL OK (teste SELECT 1).');
+      rawEventStore = new RawEventStore({ pgPool, extractorVersion: rawEventExtractorVersion });
+      rawEventBuffer = new RawEventWriteBuffer({
+        rawEventStore,
+        maxBuffer: Number(process.env.RAW_EVENT_BUFFER_MAX || 5000),
+        flushIntervalMs: Number(process.env.RAW_EVENT_FLUSH_MS || 2000),
+        batchSize: Number(process.env.RAW_EVENT_BATCH_SIZE || 100),
+      });
+      rawEventBuffer.start();
+      console.info(
+        '[telemetry] RawEventWriteBuffer ativo · usa o mesmo pgPool que RawEventStore (batch INSERT no flush).'
+      );
+    } catch (e) {
+      console.warn('[telemetry] falha ao iniciar Postgres:', e?.message || e);
+      pgPool = null;
+      rawEventStore = null;
+      rawEventBuffer = null;
+    }
+  } else {
+    console.info(
+      '[telemetry] DATABASE_URL ausente — raw_events desligado (defina no .env; veja .env.example).'
+    );
+  }
+
+  const runId = randomUUID();
+
+  try {
   const { browser, userAgent } = await launchBrowser();
   console.info('[browser] User-Agent:', userAgent);
 
@@ -460,12 +525,23 @@ async function main() {
   const sniffer = new NetworkSniffer(page, config.apiUrlIncludes, {
     debug: config.debugScraper,
     onDebugSample: config.debugScraper ? (e) => metrics.addSnifferDebug(e) : null,
+    rawEventBuffer,
+    rawEventExtractorVersion,
+    runId,
+    sessionEpoch: null,
   });
   sniffer.attach();
 
   async function finishRun(exitNote = '') {
     if (exitNote) console.info(exitNote);
     await store.flush().catch((e) => console.error('[persistência] falha ao gravar:', e));
+    if (rawEventBuffer) {
+      const tm = rawEventBuffer.getMetrics();
+      console.info(
+        `[telemetry] raw_events: buffer=${tm.bufferLength} inseridos=${tm.totalInserted} falhados=${tm.totalFailed} descartados=${tm.totalDropped}`
+      );
+      await rawEventBuffer.stopAndFlushAll().catch((e) => console.error('[telemetry] flush final:', e?.message || e));
+    }
     await browser.close();
     await flushRunArtifacts(metrics).catch((e) => console.error('[métricas] falha ao gravar:', e));
     console.info('[fim] JSON:', jsonPath);
@@ -527,6 +603,14 @@ async function main() {
   }
 
   await finishRun();
+  } finally {
+    if (rawEventBuffer) {
+      await rawEventBuffer.stopAndFlushAll().catch((e) => console.warn('[telemetry] flush (finally):', e?.message || e));
+    }
+    if (pgPool) {
+      await pgPool.end().catch((e) => console.warn('[telemetry] pg pool end:', e?.message || e));
+    }
+  }
 }
 
 main().catch((e) => {
