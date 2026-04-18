@@ -2,13 +2,38 @@ import { sleep } from './util.js';
 
 const PDP_LINK_SEL = 'a[href*="/pdp/"], a[href*="/br/pdp/"], a[href*="/view/product"]';
 
+/** Só diagnóstico: âncoras que parecem loja/produto sem alterar o seletor definitivo. */
+const PDP_LINK_DIAG_BROAD_SEL = 'a[href*="shop.tiktok"], a[href*="/product"]';
+
+const HREF_DIAG_TRUNC = 140;
+
 /**
  * @param {import('puppeteer').Page} page
  */
 export async function collectPdpLinks(page) {
-  const hrefs = await page.evaluate((sel) => {
+  const result = await page.evaluate((sel, broadSel, truncLen) => {
+    function trunc(s) {
+      if (s.length <= truncLen) return s;
+      return `${s.slice(0, truncLen)}…`;
+    }
+    function resolveHref(a) {
+      try {
+        return new URL(a.getAttribute('href') || '', location.href).href.split('#')[0];
+      } catch {
+        return String(a.getAttribute('href') || '').trim();
+      }
+    }
+
+    const pdpAnchors = [...document.querySelectorAll(sel)];
+    const broadAnchors = [...document.querySelectorAll(broadSel)];
+
+    let anchorHrefNonEmpty = 0;
+    for (const a of document.querySelectorAll('a[href]')) {
+      if ((a.getAttribute('href') || '').trim()) anchorHrefNonEmpty += 1;
+    }
+
     const out = new Set();
-    for (const a of document.querySelectorAll(sel)) {
+    for (const a of pdpAnchors) {
       try {
         const abs = new URL(a.getAttribute('href') || '', location.href).href;
         const u = new URL(abs);
@@ -20,9 +45,29 @@ export async function collectPdpLinks(page) {
         /* ignore */
       }
     }
-    return Array.from(out);
-  }, PDP_LINK_SEL);
-  return [...new Set(hrefs)].sort();
+
+    const sampleBroad = [...new Set(broadAnchors.map((a) => trunc(resolveHref(a))))].slice(0, 10);
+    const samplePdp = [...new Set(pdpAnchors.map((a) => trunc(resolveHref(a))))].slice(0, 10);
+
+    return {
+      hrefs: Array.from(out),
+      countPdpSel: pdpAnchors.length,
+      countAnchorsHref: anchorHrefNonEmpty,
+      countBroad: broadAnchors.length,
+      sampleBroad,
+      samplePdp,
+    };
+  }, PDP_LINK_SEL, PDP_LINK_DIAG_BROAD_SEL, HREF_DIAG_TRUNC);
+
+  console.info('[collectPdpLinks] diagnóstico', {
+    matches_seletor_atual: result.countPdpSel,
+    total_a_com_href_nao_vazio: result.countAnchorsHref,
+    matches_seletor_amplo_shop_tiktok_ou_product: result.countBroad,
+    amostra_seletor_amplo_ate10: result.sampleBroad,
+    amostra_seletor_atual_ate10: result.samplePdp,
+  });
+
+  return [...new Set(result.hrefs)].sort();
 }
 
 /**
