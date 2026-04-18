@@ -129,10 +129,29 @@ export async function extractSsrListingRows(page) {
       /** @type {Record<string, unknown> | null} */
       let shipping = null;
       const labels = p.product_marketing_info?.shipping_labels;
-      if (Array.isArray(labels) && labels.some((l) => String(l).toLowerCase().includes('free'))) {
-        shipping = { price: 0, is_free: true, text: 'Free shipping' };
+      function labelLooksFree(raw) {
+        const s = String(raw ?? '')
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        return (
+          s.includes('free') ||
+          s.includes('gratis') ||
+          s.includes('sem frete') ||
+          s.includes('envio gratis')
+        );
+      }
+      if (Array.isArray(labels) && labels.some((l) => labelLooksFree(l))) {
+        shipping = { price: 0, is_free: true, text: 'Frete grátis' };
       } else {
-        shipping = { price: 0, is_free: false, text: 'unknown' };
+        shipping = {
+          price: null,
+          is_free: false,
+          text: 'unknown',
+          original_price: null,
+          delivery_name: '',
+          shipping_type: '',
+        };
       }
 
       /** @type {Record<string, unknown>} */

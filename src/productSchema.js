@@ -194,6 +194,13 @@ export function emptyProduct() {
     image_main: '',
     variants: [],
     description: '',
+    shop_name: '',
+    shop_logo: '',
+    seller_id: '',
+    shop_link: '',
+    shop_product_count: null,
+    shop_review_count: null,
+    shop_sold_count: null,
     url: '',
     url_primary: '',
     url_type: 'static',
@@ -289,6 +296,24 @@ export function mergeProduct(prev, incoming, provenance = '') {
       out.rating_count = mergeRatingCount(out.rating_count, incoming.rating_count, prevChain, provenance);
       continue;
     }
+    if (k === 'rating_distribution') {
+      const inc = incoming.rating_distribution;
+      if (inc == null || typeof inc !== 'object') continue;
+      const empty =
+        Array.isArray(inc) ? inc.length === 0 : Object.keys(/** @type {Record<string, unknown>} */ (inc)).length === 0;
+      if (empty) continue;
+      const prevD = out.rating_distribution;
+      const hasPrev =
+        prevD != null &&
+        typeof prevD === 'object' &&
+        (Array.isArray(prevD) ? prevD.length > 0 : Object.keys(/** @type {Record<string, unknown>} */ (prevD)).length > 0);
+      if (!hasPrev || incomingWinsConflict(prevChain, provenance)) {
+        out.rating_distribution = /** @type {typeof out.rating_distribution} */ (
+          JSON.parse(JSON.stringify(inc))
+        );
+      }
+      continue;
+    }
     if (k === 'taxonomy_path') {
       out.taxonomy_path = mergeStringScalar(out.taxonomy_path, incoming.taxonomy_path, prevChain, provenance);
       continue;
@@ -307,6 +332,26 @@ export function mergeProduct(prev, incoming, provenance = '') {
     }
     if (k === 'description') {
       out.description = mergeStringScalar(out.description, incoming.description, prevChain, provenance);
+      continue;
+    }
+    if (k === 'shop_name') {
+      out.shop_name = mergeStringScalar(out.shop_name, incoming.shop_name, prevChain, provenance);
+      continue;
+    }
+    if (k === 'shop_logo') {
+      out.shop_logo = mergeStringScalar(out.shop_logo, incoming.shop_logo, prevChain, provenance);
+      continue;
+    }
+    if (k === 'seller_id') {
+      out.seller_id = mergeStringScalar(out.seller_id, incoming.seller_id, prevChain, provenance);
+      continue;
+    }
+    if (k === 'shop_link') {
+      out.shop_link = mergeStringScalar(out.shop_link, incoming.shop_link, prevChain, provenance);
+      continue;
+    }
+    if (k === 'shop_product_count' || k === 'shop_review_count' || k === 'shop_sold_count') {
+      out[k] = mergeRatingCount(out[k], incoming[k], prevChain, provenance);
       continue;
     }
     if (k === 'rank_position') {
@@ -383,9 +428,48 @@ export function fromLegacyRow(row) {
   if (row.rating_count != null && row.rating_count !== '') {
     payload.rating_count = num(row.rating_count);
   }
+  if (row.rating_distribution != null && typeof row.rating_distribution === 'object') {
+    try {
+      const cloned = JSON.parse(JSON.stringify(row.rating_distribution));
+      const empty =
+        Array.isArray(cloned) ? cloned.length === 0 : Object.keys(cloned).length === 0;
+      if (!empty) payload.rating_distribution = cloned;
+    } catch {
+      /* ignorar */
+    }
+  }
   if (row.rank_position != null) payload.rank_position = num(row.rank_position);
   if (row.shipping && typeof row.shipping === 'object') {
     payload.shipping = normalizeShippingEntry(row.shipping);
+  }
+
+  const shn = str(row.shop_name);
+  if (shn) payload.shop_name = shn;
+  const shl = str(row.shop_logo);
+  if (shl) payload.shop_logo = shl;
+  const sid = str(row.seller_id);
+  if (sid) payload.seller_id = sid;
+  const slk = str(row.shop_link);
+  if (slk) payload.shop_link = slk;
+  for (const key of ['shop_product_count', 'shop_review_count', 'shop_sold_count']) {
+    const raw = row[key];
+    if (raw != null && raw !== '') {
+      const n = num(raw);
+      if (Number.isFinite(n)) payload[key] = n;
+    }
+  }
+
+  if (Array.isArray(row.variants) && row.variants.length) {
+    /** @type {{ name: string; value: string }[]} */
+    const cleaned = [];
+    for (const it of row.variants) {
+      if (!it || typeof it !== 'object') continue;
+      const o = /** @type {Record<string, unknown>} */ (it);
+      const n = str(o.name);
+      const v = str(o.value);
+      if (n && v) cleaned.push({ name: n, value: v });
+    }
+    if (cleaned.length) payload.variants = cleaned;
   }
 
   return mergeProduct(emptyProduct(), payload, '');

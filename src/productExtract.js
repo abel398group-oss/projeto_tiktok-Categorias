@@ -1,3 +1,5 @@
+import { extractFreeShippingFromListingLabels } from './shippingExtract.js';
+
 function asString(v) {
   if (v === null || v === undefined) return '';
   if (typeof v === 'string') return v.trim();
@@ -498,6 +500,20 @@ export function normalizeProduct(raw, taxonomia) {
     images: imgs,
     data_coleta: '',
   };
+
+  const freeFromLabels = extractFreeShippingFromListingLabels(node);
+  if (freeFromLabels) {
+    row.shipping = freeFromLabels;
+  } else {
+    row.shipping = {
+      price: null,
+      is_free: false,
+      text: 'unknown',
+      original_price: null,
+      delivery_name: '',
+      shipping_type: '',
+    };
+  }
 
   if (ppi && typeof ppi === 'object' && ppi.discount != null) {
     const d = Number(ppi.discount);

@@ -86,6 +86,19 @@ export function normalizeProductRecord(p) {
   out.canonical_url_hash = hashCanonicalUrlPrimary(out.url_primary);
   out.taxonomy_path = str(p.taxonomy_path);
   out.description = str(p.description);
+  out.shop_name = str(p.shop_name);
+  {
+    const sl = str(p.shop_logo);
+    out.shop_logo = sl.startsWith('//') ? `https:${sl}` : sl;
+  }
+  out.seller_id = str(p.seller_id);
+  out.shop_link = str(p.shop_link);
+  out.shop_product_count =
+    p.shop_product_count == null || p.shop_product_count === '' ? null : num(p.shop_product_count);
+  out.shop_review_count =
+    p.shop_review_count == null || p.shop_review_count === '' ? null : num(p.shop_review_count);
+  out.shop_sold_count =
+    p.shop_sold_count == null || p.shop_sold_count === '' ? null : num(p.shop_sold_count);
   out.collected_at = str(p.collected_at) || new Date().toISOString();
 
   out.price_current = num(p.price_current);
@@ -104,7 +117,15 @@ export function normalizeProductRecord(p) {
   out.normalized_sales = Math.log1p(out.sales_count);
   out.rating = num(p.rating);
   out.rating_count = p.rating_count == null || p.rating_count === '' ? null : num(p.rating_count);
-  out.rating_distribution = p.rating_distribution ?? null;
+  if (p.rating_distribution == null || typeof p.rating_distribution !== 'object') {
+    out.rating_distribution = null;
+  } else {
+    try {
+      out.rating_distribution = JSON.parse(JSON.stringify(p.rating_distribution));
+    } catch {
+      out.rating_distribution = null;
+    }
+  }
 
   const rc = reviewConfidence(out.rating_count);
   out.score =
@@ -129,7 +150,20 @@ export function normalizeProductRecord(p) {
 
   out.images = dedupeImagesList(p.images, out.product_id);
   out.image_main = out.images[0] || str(p.image_main);
-  out.variants = Array.isArray(p.variants) ? p.variants : [];
+  if (Array.isArray(p.variants) && p.variants.length) {
+    /** @type {{ name: string; value: string }[]} */
+    const vclean = [];
+    for (const it of p.variants) {
+      if (!it || typeof it !== 'object') continue;
+      const o = /** @type {Record<string, unknown>} */ (it);
+      const n = str(o.name);
+      const v = str(o.value);
+      if (n && v) vclean.push({ name: n, value: v });
+    }
+    out.variants = vclean;
+  } else {
+    out.variants = [];
+  }
   out.categories = Array.isArray(p.categories) && p.categories.length ? p.categories : ['uncategorized'];
   out.rank_position = num(p.rank_position);
   out.shipping = normalizeShippingEntry(p.shipping);
