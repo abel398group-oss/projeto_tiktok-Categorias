@@ -80,6 +80,86 @@ export async function extractSsrListingRows(page) {
       return '';
     }
 
+    /** Alinhado a src/shopExtract.js + PDP (mesmos campos no JSON do router). */
+    function shopLogoUrlFromSeller(raw) {
+      if (raw == null) return '';
+      if (typeof raw === 'string') return String(raw).trim();
+      if (typeof raw === 'object') {
+        const o = raw;
+        const ul = o.url_list || o.urlList;
+        if (Array.isArray(ul) && ul[0] != null) return String(ul[0]).trim();
+        const u = o.url || o.uri || o.src;
+        if (u != null) return String(u).trim();
+      }
+      return '';
+    }
+
+    function extractShopFieldsFromProductNode(p) {
+      /** @type {Record<string, unknown>} */
+      const row = {};
+      if (!p || typeof p !== 'object') return row;
+      const root = p;
+      const pinfo =
+        (root.product_info || root.productInfo) && typeof (root.product_info || root.productInfo) === 'object'
+          ? root.product_info || root.productInfo
+          : root;
+
+      const sm = pinfo.seller_model || pinfo.sellerModel || root.seller_model || root.sellerModel;
+      if (sm && typeof sm === 'object') {
+        const sn = String(sm.shop_name || sm.shopName || '').trim();
+        if (sn) row.shop_name = sn;
+        const sl = shopLogoUrlFromSeller(sm.shop_logo || sm.shopLogo);
+        if (sl) row.shop_logo = sl;
+      }
+
+      const sinfo = pinfo.shop_info || pinfo.shopInfo || root.shop_info || root.shopInfo;
+      if (sinfo && typeof sinfo === 'object') {
+        const sid = String(sinfo.seller_id || sinfo.sellerId || '').trim();
+        if (sid) row.seller_id = sid;
+        const slk = String(sinfo.shop_link || sinfo.shopLink || '').trim();
+        if (slk) row.shop_link = slk;
+        const osp = sinfo.on_sell_product_count ?? sinfo.onSellProductCount;
+        if (osp != null && String(osp).trim() !== '') {
+          const n = Number(osp);
+          if (Number.isFinite(n)) row.shop_product_count = n;
+        }
+        const src = sinfo.review_count || sinfo.reviewCount;
+        if (src != null && String(src).trim() !== '') {
+          const n = Number(src);
+          if (Number.isFinite(n)) row.shop_review_count = n;
+        }
+        const ssc = sinfo.sold_count || sinfo.soldCount;
+        if (ssc != null && String(ssc).trim() !== '') {
+          const n = Number(ssc);
+          if (Number.isFinite(n)) row.shop_sold_count = n;
+        }
+      }
+
+      if (!row.shop_name) {
+        const mkt = root.product_marketing_info || root.productMarketingInfo;
+        if (mkt && typeof mkt === 'object') {
+          const sellerName = String(
+            mkt.seller_name || mkt.sellerName || mkt.shop_name || mkt.shopName || ''
+          ).trim();
+          if (sellerName) row.shop_name = sellerName;
+        }
+      }
+
+      if (!row.shop_name) {
+        const sel = root.seller || root.seller_info || root.sellerInfo;
+        if (sel && typeof sel === 'object') {
+          const name = String(sel.shop_name || sel.shopName || sel.name || sel.seller_name || sel.sellerName || '').trim();
+          if (name) row.shop_name = name;
+          if (!row.shop_logo) {
+            const lg = shopLogoUrlFromSeller(sel.shop_logo || sel.shopLogo || sel.logo);
+            if (lg) row.shop_logo = lg;
+          }
+        }
+      }
+
+      return row;
+    }
+
     function ingestProductNode(p) {
       if (!p || typeof p !== 'object') return;
       const id = String(p.product_id ?? p.productId ?? '').trim();
@@ -171,6 +251,10 @@ export async function extractSsrListingRows(page) {
         data_coleta: coleta,
         shipping,
       };
+      const shopExtra = extractShopFieldsFromProductNode(p);
+      for (const [k, v] of Object.entries(shopExtra)) {
+        if (v !== '' && v !== null && v !== undefined) row[k] = v;
+      }
       out.push(row);
     }
 

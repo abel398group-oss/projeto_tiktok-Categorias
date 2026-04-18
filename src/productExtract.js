@@ -1,4 +1,5 @@
 import { extractFreeShippingFromListingLabels } from './shippingExtract.js';
+import { extractShopFieldsFromProductNode } from './shopExtract.js';
 
 function asString(v) {
   if (v === null || v === undefined) return '';
@@ -518,6 +519,11 @@ export function normalizeProduct(raw, taxonomia) {
   if (ppi && typeof ppi === 'object' && ppi.discount != null) {
     const d = Number(ppi.discount);
     if (Number.isFinite(d) && d > 0) row.discount = String(d);
+  }
+
+  const shopExtra = extractShopFieldsFromProductNode(node);
+  for (const [k, v] of Object.entries(shopExtra)) {
+    if (v !== '' && v !== null && v !== undefined) row[k] = v;
   }
 
   return row;

@@ -199,8 +199,12 @@ function extractPdpPricesFromRouter(page) {
       shopLogo = shopLogoUrlFromSeller(sm.shop_logo ?? sm.shopLogo);
     }
 
+    // shop_info vem no mesmo component_data que product_info (irmão), não dentro de product_info.
     const sinfo = /** @type {Record<string, unknown> | undefined} */ (
-      pinfo.shop_info ?? pinfo.shopInfo
+      cd.shop_info ??
+        cd.shopInfo ??
+        pinfo.shop_info ??
+        pinfo.shopInfo
     );
     let sellerId = '';
     let shopLink = '';
@@ -213,7 +217,11 @@ function extractPdpPricesFromRouter(page) {
     if (sinfo && typeof sinfo === 'object') {
       sellerId = String(sinfo.seller_id ?? sinfo.sellerId ?? '').trim();
       shopLink = String(sinfo.shop_link ?? sinfo.shopLink ?? '').trim();
-      const osp = sinfo.on_sell_product_count ?? sinfo.onSellProductCount;
+      const osp =
+        sinfo.on_sell_product_count ??
+        sinfo.onSellProductCount ??
+        sinfo.display_on_sell_product_count ??
+        sinfo.displayOnSellProductCount;
       if (osp != null && String(osp).trim() !== '') {
         const n = Number(osp);
         if (Number.isFinite(n)) shopProductCount = n;
@@ -223,11 +231,18 @@ function extractPdpPricesFromRouter(page) {
         const n = Number(src);
         if (Number.isFinite(n)) shopReviewCount = n;
       }
-      const ssc = sinfo.sold_count ?? sinfo.soldCount;
+      const ssc =
+        sinfo.sold_count ??
+        sinfo.soldCount ??
+        sinfo.global_sold_count ??
+        sinfo.globalSoldCount;
       if (ssc != null && String(ssc).trim() !== '') {
         const n = Number(ssc);
         if (Number.isFinite(n)) shopSoldCount = n;
       }
+    }
+    if (!sellerId && pmModel && typeof pmModel === 'object') {
+      sellerId = String(pmModel.seller_id ?? pmModel.sellerId ?? '').trim();
     }
 
     /** @type {{ name: string; value: string }[]} */
