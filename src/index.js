@@ -255,9 +255,12 @@ async function buildCategoryUrlQueue(page) {
  */
 /**
  * @param {() => boolean} [isTimeExceeded]
+ * @returns {Promise<boolean>} true se o run deve terminar logo (STOP_AFTER_PDP_OK atingido)
  */
 async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metrics, isTimeExceeded) {
   const timeExceededFn = typeof isTimeExceeded === 'function' ? isTimeExceeded : () => false;
+  /** Parada controlada: sair dos loops e deixar `main` chamar finishRun. */
+  let stopRunAfterPdpOk = false;
   const scrapedIds = new Set();
   let stagnantPasses = 0;
   let catSsr = 0;
@@ -410,6 +413,18 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
           console.info(
             `[pdp] ok sku=${sku} +${stPdp.added} ~${stPdp.updated} | ${(row.nome || '').slice(0, 48)}`
           );
+
+          if (
+            config.stopAfterPdpOk != null &&
+            metrics &&
+            metrics.extracted.pdp_ok >= config.stopAfterPdpOk
+          ) {
+            console.info(
+              `[stop] STOP_AFTER_PDP_OK=${config.stopAfterPdpOk} atingido (pdp_ok=${metrics.extracted.pdp_ok}); encerramento normal.`
+            );
+            stopRunAfterPdpOk = true;
+            break;
+          }
         } catch (e) {
           catPdpErr += 1;
           if (metrics) metrics.extracted.pdp_errors += 1;
@@ -417,6 +432,10 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         }
 
         await sleep(randomBetween(config.pdpDelayMinMs, config.pdpDelayMaxMs));
+      }
+
+      if (stopRunAfterPdpOk) {
+        break;
       }
 
       if (timeExceededFn()) {
@@ -448,6 +467,7 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
     );
     await store.flush().catch((e) => console.error('[persistência] falha ao gravar:', e));
   }
+  return stopRunAfterPdpOk;
 }
 
 async function main() {
@@ -464,6 +484,8 @@ async function main() {
   console.info(
     `[store] JSON: ${jsonPath} | produtos: ${store.byId.size}${csvPath ? ` | CSV: ${csvPath}` : ''}${
       config.maxProducts != null ? ` | MAX_PRODUCTS=${config.maxProducts} (modo teste)` : ''
+    }${
+      config.stopAfterPdpOk != null ? ` | STOP_AFTER_PDP_OK=${config.stopAfterPdpOk} (parada após N PDPs ok)` : ''
     }`
   );
   console.info(
@@ -576,11 +598,17 @@ async function main() {
     sniffer.resetForNewCategory();
     console.info(`\n=== Categoria ${i + 1}/${categoryQueue.length}: ${url} ===`);
 
+    let stopAfterPdp = false;
     try {
-      await scrapeCategoryWithPdpFlow(page, url, sniffer, store, metrics, timeExceeded);
+      stopAfterPdp = await scrapeCategoryWithPdpFlow(page, url, sniffer, store, metrics, timeExceeded);
     } catch (e) {
       console.error(`[erro] categoria ${url}:`, e?.message || e);
       await store.flush().catch(() => {});
+    }
+
+    if (stopAfterPdp) {
+      await finishRun('[stop] Encerramento normal após STOP_AFTER_PDP_OK.');
+      return;
     }
 
     if (isProductCapReached(store)) {

@@ -41,6 +41,8 @@ const outputCsvPathIfEnabled =
     : legacyCsvExplicit || './output/produtos.csv';
 const outputCsv = enableCsv ? outputCsvPathIfEnabled : '';
 const maxProducts = optionalPositiveIntEnv('MAX_PRODUCTS');
+/** Após N PDPs bem-sucedidos no run, encerra o fluxo com gravação normal (omitir = sem limite). */
+const stopAfterPdpOk = optionalPositiveIntEnv('STOP_AFTER_PDP_OK');
 
 export const config = {
   startUrl: process.env.TIKTOK_START_URL || 'https://shop.tiktok.com/br',
@@ -93,4 +95,5 @@ export const config = {
    * Omitir ou inválido = execução normal sem teto.
    */
   maxProducts,
+  stopAfterPdpOk,
 };
