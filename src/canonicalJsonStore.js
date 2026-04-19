@@ -10,6 +10,7 @@ import {
   normalizeProductRecord,
   validateStorable,
 } from './recordNormalizer.js';
+import { writeFileAtomic } from './util.js';
 
 const CSV_HEADERS = COLUMN_DEFS.map((c) => ({ id: c.key, title: c.header }));
 
@@ -30,6 +31,12 @@ export class CanonicalJsonStore {
     this.meta = { version: 1, updated_at: '' };
     /** @type {import('./runMetrics.js').RunMetrics | null} */
     this.metrics = opts.metrics ?? null;
+    /** Produtos alterados desde o último sync Postgres (quando `PRODUCTS_DB_SYNC`). */
+    this.pgDirtyIds = new Set();
+  }
+
+  clearPgDirtyIds() {
+    this.pgDirtyIds.clear();
   }
 
   /**
@@ -90,6 +97,7 @@ export class CanonicalJsonStore {
 
     const isNew = !this.byId.has(id);
     this.byId.set(id, norm);
+    if (config.productsDbSync) this.pgDirtyIds.add(id);
     const st = { added: isNew ? 1 : 0, updated: isNew ? 0 : 1, skipped: 0, reason: '', product_id: id };
     this.metrics?.onUpsertResult(provenance, st, legacyRow);
     return st;
@@ -127,7 +135,7 @@ export class CanonicalJsonStore {
       items,
     };
     await fsPromises.mkdir(path.dirname(this.jsonPath), { recursive: true });
-    await fsPromises.writeFile(this.jsonPath, JSON.stringify(payload, null, 2), 'utf8');
+    await writeFileAtomic(this.jsonPath, JSON.stringify(payload, null, 2), 'utf8');
   }
 
   async writeCsvIfConfigured() {

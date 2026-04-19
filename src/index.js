@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { createPgPool } from './db/postgres.js';
+import { persistCanonicalStore } from './db/productSync.js';
 import { RawEventStore } from './telemetry/rawEventStore.js';
 import { RawEventWriteBuffer } from './telemetry/rawEventBuffer.js';
 import { RunMetrics, flushRunArtifacts } from './runMetrics.js';
@@ -258,7 +259,10 @@ async function buildCategoryUrlQueue(page) {
  * @param {() => boolean} [isTimeExceeded]
  * @returns {Promise<boolean>} true se o run deve terminar logo (STOP_AFTER_PDP_OK atingido)
  */
-async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metrics, isTimeExceeded) {
+/**
+ * @param {import('pg').Pool | null} [pgPool]
+ */
+async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metrics, isTimeExceeded, pgPool = null) {
   const timeExceededFn = typeof isTimeExceeded === 'function' ? isTimeExceeded : () => false;
   /** Parada controlada: sair dos loops e deixar `main` chamar finishRun. */
   let stopRunAfterPdpOk = false;
@@ -322,7 +326,7 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         console.info(
           `[upsert] SSR +${stSsr.added} ~${stSsr.updated} skip=${stSsr.skipped}`
         );
-        if (stSsr.added > 0 || stSsr.updated > 0) await store.flush();
+        if (stSsr.added > 0 || stSsr.updated > 0) await persistCanonicalStore(store, pgPool);
       }
 
       const netBatch = sniffer.drainBuffer();
@@ -339,7 +343,7 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         console.info(
           `[upsert] network +${stNet.added} ~${stNet.updated} skip=${stNet.skipped}`
         );
-        if (stNet.added > 0 || stNet.updated > 0) await store.flush();
+        if (stNet.added > 0 || stNet.updated > 0) await persistCanonicalStore(store, pgPool);
       }
 
       if (isProductCapReached(store)) {
@@ -413,7 +417,7 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
           const stPdp = store.upsertLegacy({ ...row, sku }, 'pdp');
           catPdpOk += 1;
           if (metrics) metrics.extracted.pdp_ok += 1;
-          if (stPdp.added > 0 || stPdp.updated > 0) await store.flush();
+          if (stPdp.added > 0 || stPdp.updated > 0) await persistCanonicalStore(store, pgPool);
 
           console.info(
             `[pdp] ok sku=${sku} +${stPdp.added} ~${stPdp.updated} | ${(row.nome || '').slice(0, 48)}`
@@ -470,7 +474,9 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
     console.info(
       `[persistência] gravando produtos.json${store.csvPath ? ' e CSV legado…' : '…'}`
     );
-    await store.flush().catch((e) => console.error('[persistência] falha ao gravar:', e));
+    await persistCanonicalStore(store, pgPool).catch((e) =>
+      console.error('[persistência] falha ao gravar:', e)
+    );
   }
   return stopRunAfterPdpOk;
 }
@@ -530,6 +536,9 @@ async function main() {
       console.info(
         '[telemetry] RawEventWriteBuffer ativo · usa o mesmo pgPool que RawEventStore (batch INSERT no flush).'
       );
+      if (config.productsDbSync) {
+        console.info('[db/products] PRODUCTS_DB_SYNC=true — tabela `products` (colunas + payload JSONB) após cada persistência.');
+      }
     } catch (e) {
       console.warn('[telemetry] falha ao iniciar Postgres:', e?.message || e);
       pgPool = null;
@@ -564,7 +573,9 @@ async function main() {
 
   async function finishRun(exitNote = '') {
     if (exitNote) console.info(exitNote);
-    await store.flush().catch((e) => console.error('[persistência] falha ao gravar:', e));
+    await persistCanonicalStore(store, pgPool).catch((e) =>
+      console.error('[persistência] falha ao gravar:', e)
+    );
     if (rawEventBuffer) {
       const tm = rawEventBuffer.getMetrics();
       console.info(
@@ -608,10 +619,10 @@ async function main() {
 
     let stopAfterPdp = false;
     try {
-      stopAfterPdp = await scrapeCategoryWithPdpFlow(page, url, sniffer, store, metrics, timeExceeded);
+      stopAfterPdp = await scrapeCategoryWithPdpFlow(page, url, sniffer, store, metrics, timeExceeded, pgPool);
     } catch (e) {
       console.error(`[erro] categoria ${url}:`, e?.message || e);
-      await store.flush().catch(() => {});
+      await persistCanonicalStore(store, pgPool).catch(() => {});
     }
 
     if (stopAfterPdp) {

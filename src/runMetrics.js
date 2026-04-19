@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { writeFileAtomic } from './util.js';
 
 const DISCARD_SAMPLE_MAX = 30;
 const SNIFFER_DEBUG_MAX = 40;
@@ -95,13 +96,13 @@ export async function flushRunArtifacts(metrics) {
   metrics.run_finished_at = new Date().toISOString();
   const mp = path.resolve(config.metricsJsonPath);
   await fs.mkdir(path.dirname(mp), { recursive: true });
-  await fs.writeFile(mp, JSON.stringify(metrics.toJSON(), null, 2), 'utf8');
+  await writeFileAtomic(mp, JSON.stringify(metrics.toJSON(), null, 2), 'utf8');
 
   const dd = config.discardedDebugPath && String(config.discardedDebugPath).trim();
   if (!dd) return;
   const dp = path.resolve(dd);
   await fs.mkdir(path.dirname(dp), { recursive: true });
-  await fs.writeFile(
+  await writeFileAtomic(
     dp,
     JSON.stringify(
       {

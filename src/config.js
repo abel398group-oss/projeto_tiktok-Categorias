@@ -135,4 +135,9 @@ export const config = {
   captchaWaitEnabled: boolEnv('CAPTCHA_WAIT', true),
   /** Máximo de espera pelo CAPTCHA (ms). */
   captchaMaxWaitMs: numEnv('CAPTCHA_MAX_WAIT_MS', 30 * 60 * 1000),
+  /**
+   * Se true e `DATABASE_URL` válida, faz upsert na tabela `products` (colunas + JSONB `payload`)
+   * após cada `flush` quando houver alterações (ou sync completo na primeira vez).
+   */
+  productsDbSync: boolEnv('PRODUCTS_DB_SYNC', false),
 };
