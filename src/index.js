@@ -20,6 +20,7 @@ import {
 import { scrapeProductDetail } from './pdpScrape.js';
 import { extractSsrListingRows } from './ssrCategoryProducts.js';
 import { sleep, randomBetween } from './util.js';
+import { waitIfCaptchaBlocking } from './captchaWait.js';
 
 /** Resumo seguro de DATABASE_URL para logs (sem password). */
 function pgConnectionHint(connectionString) {
@@ -288,6 +289,10 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
       }
 
       await page.goto(categoryUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+      await waitIfCaptchaBlocking(page, {
+        enabled: config.captchaWaitEnabled,
+        maxWaitMs: config.captchaMaxWaitMs,
+      });
       await sleep(randomBetween(2000, 4000));
 
       const catLabel = (await resolveCategoryLabel(page, categoryUrl)) || labelFromUrl(categoryUrl);
@@ -472,8 +477,9 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
 
 async function main() {
   const startTime = Date.now();
-  const runDurationMs = (Number(process.env.RUN_DURATION_MINUTES) || 2) * 60 * 1000;
+  const runDurationMs = config.runDurationMs;
   function timeExceeded() {
+    if (runDurationMs == null) return false;
     return Date.now() - startTime >= runDurationMs;
   }
 
@@ -489,7 +495,9 @@ async function main() {
     }`
   );
   console.info(
-    `[run] duração máxima: ${runDurationMs / 60_000} min (RUN_DURATION_MINUTES, omitir = 2)`
+    runDurationMs == null
+      ? '[run] duração: sem limite (até a fila de categorias acabar ou interromper). Defina RUN_DURATION_MINUTES=N para parar após N minutos.'
+      : `[run] duração máxima: ${runDurationMs / 60_000} min`
   );
 
   /** @type {import('pg').Pool | null} */

@@ -2,11 +2,18 @@
  * Modelo canónico alinhado ao produtos.json de referência (sem lifecycle worker).
  */
 
+import { config } from './config.js';
 import {
   emptyShipping,
   mergeShippingPreferComplete,
   normalizeShippingEntry,
 } from './shippingExtract.js';
+import {
+  clampProductProperties,
+  clampProductVideo,
+  clampSkuOffers,
+} from './pdpExtrasExtract.js';
+import { clampReviewSamples } from './reviewSampleExtract.js';
 
 function num(v) {
   if (v === null || v === undefined || v === '') return 0;
@@ -17,6 +24,25 @@ function num(v) {
 function str(v) {
   if (v == null) return '';
   return String(v).trim();
+}
+
+/**
+ * Segmentos de categoria a partir da linha legada (`categories` ou `taxonomia` com " > ").
+ * @param {Record<string, unknown>} row
+ * @returns {string[]}
+ */
+function categoriesFromLegacyRow(row) {
+  if (Array.isArray(row.categories) && row.categories.length) {
+    const out = [];
+    for (const x of row.categories) {
+      const s = str(x);
+      if (s) out.push(s);
+    }
+    return out;
+  }
+  const t = str(row.taxonomia);
+  if (!t) return [];
+  return t.split(/\s*>\s*/).map((s) => s.trim()).filter(Boolean);
 }
 
 /** Ordem de confiança em conflitos (PDP > rede > SSR); empate favorece o incoming (passagem mais recente). */
@@ -213,6 +239,13 @@ export function emptyProduct() {
     missing_fields: [],
     _provenance: '',
     shipping: emptyShipping(),
+    review_samples: [],
+    /** Vídeo principal do produto (URL + poster opcional). */
+    product_video: null,
+    /** Propriedades de venda (nome + valores possíveis por dimensão). */
+    product_properties: [],
+    /** SKUs com preços/stock quando o router expõe lista completa. */
+    sku_offers: [],
   };
 }
 
@@ -227,6 +260,13 @@ export function mergeProduct(prev, incoming, provenance = '') {
   out.images = Array.isArray(prev.images) ? [...prev.images] : [];
   out.categories = Array.isArray(prev.categories) ? [...prev.categories] : [];
   out.price_history = Array.isArray(prev.price_history) ? [...prev.price_history] : [];
+  out.review_samples = Array.isArray(prev.review_samples) ? [...prev.review_samples] : [];
+  out.product_properties = Array.isArray(prev.product_properties)
+    ? JSON.parse(JSON.stringify(prev.product_properties))
+    : [];
+  out.sku_offers = Array.isArray(prev.sku_offers)
+    ? JSON.parse(JSON.stringify(prev.sku_offers))
+    : [];
   out.shipping = normalizeShippingEntry(prev.shipping !== undefined ? prev.shipping : out.shipping);
 
   const prevChain = str(prev._provenance);
@@ -245,6 +285,38 @@ export function mergeProduct(prev, incoming, provenance = '') {
       if (!Array.isArray(incV) || !incV.length) continue;
       if (!out.variants.length || incomingWinsConflict(prevChain, provenance)) {
         out.variants = [...incV];
+      }
+      continue;
+    }
+    if (k === 'review_samples') {
+      const incR = incoming.review_samples;
+      if (!Array.isArray(incR) || !incR.length) continue;
+      if (!out.review_samples.length || incomingWinsConflict(prevChain, provenance)) {
+        out.review_samples = JSON.parse(JSON.stringify(incR));
+      }
+      continue;
+    }
+    if (k === 'product_video') {
+      const inc = incoming.product_video;
+      if (inc == null || typeof inc !== 'object') continue;
+      if (!out.product_video || incomingWinsConflict(prevChain, provenance)) {
+        out.product_video = JSON.parse(JSON.stringify(inc));
+      }
+      continue;
+    }
+    if (k === 'product_properties') {
+      const incP = incoming.product_properties;
+      if (!Array.isArray(incP) || !incP.length) continue;
+      if (!out.product_properties.length || incomingWinsConflict(prevChain, provenance)) {
+        out.product_properties = JSON.parse(JSON.stringify(incP));
+      }
+      continue;
+    }
+    if (k === 'sku_offers') {
+      const incS = incoming.sku_offers;
+      if (!Array.isArray(incS) || !incS.length) continue;
+      if (!out.sku_offers.length || incomingWinsConflict(prevChain, provenance)) {
+        out.sku_offers = JSON.parse(JSON.stringify(incS));
       }
       continue;
     }
@@ -409,6 +481,9 @@ export function fromLegacyRow(row) {
     discount = Math.round(100 * (1 - price / priceO));
   }
 
+  const catSegments = categoriesFromLegacyRow(row);
+  const taxoStr = str(row.taxonomia) || (catSegments.length ? catSegments.join(' > ') : '');
+
   /** @type {Record<string, unknown>} */
   const payload = {
     product_id: sku,
@@ -419,12 +494,16 @@ export function fromLegacyRow(row) {
     discount,
     rating: num(row.nota_avaliacao),
     sales_count: num(String(row.total_vendas || '').replace(/[^\d.]/g, '')),
-    taxonomy_path: str(row.taxonomia),
+    taxonomy_path: taxoStr,
     url: link,
     images: imgs,
     image_main: img || imgs[0] || '',
     collected_at: str(row.data_coleta) || new Date().toISOString(),
   };
+  if (catSegments.length) {
+    payload.categories = catSegments;
+    payload.product_category_from_breadcrumb = catSegments[catSegments.length - 1];
+  }
   if (row.rating_count != null && row.rating_count !== '') {
     payload.rating_count = num(row.rating_count);
   }
@@ -470,6 +549,27 @@ export function fromLegacyRow(row) {
       if (n && v) cleaned.push({ name: n, value: v });
     }
     if (cleaned.length) payload.variants = cleaned;
+  }
+
+  if (Array.isArray(row.review_samples) && row.review_samples.length) {
+    payload.review_samples = clampReviewSamples(row.review_samples, {
+      maxReviews: config.reviewSampleMaxCount,
+      maxTextChars: config.reviewSampleMaxText,
+      maxPhotosPerReview: config.reviewSampleMaxPhotos,
+    });
+  }
+  if (row.product_video != null && typeof row.product_video === 'object') {
+    const v = clampProductVideo(row.product_video);
+    if (v) payload.product_video = v;
+  }
+  if (Array.isArray(row.product_properties) && row.product_properties.length) {
+    payload.product_properties = clampProductProperties(row.product_properties, {
+      maxProps: config.pdpPropertyMaxProps,
+      maxValuesPerProp: config.pdpPropertyMaxValues,
+    });
+  }
+  if (Array.isArray(row.sku_offers) && row.sku_offers.length) {
+    payload.sku_offers = clampSkuOffers(row.sku_offers, { maxRows: config.pdpSkuOffersMax });
   }
 
   return mergeProduct(emptyProduct(), payload, '');

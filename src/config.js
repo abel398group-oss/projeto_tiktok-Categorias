@@ -44,6 +44,18 @@ const maxProducts = optionalPositiveIntEnv('MAX_PRODUCTS');
 /** Após N PDPs bem-sucedidos no run, encerra o fluxo com gravação normal (omitir = sem limite). */
 const stopAfterPdpOk = optionalPositiveIntEnv('STOP_AFTER_PDP_OK');
 
+/**
+ * Limite de tempo da corrida inteira. `null` = sem limite (até acabar a fila ou erro).
+ * `RUN_DURATION_MINUTES=0` ou vazio = sem limite. Número positivo = minutos.
+ */
+function optionalRunDurationMs() {
+  const raw = process.env.RUN_DURATION_MINUTES;
+  if (raw === undefined || String(raw).trim() === '') return null;
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n * 60 * 1000;
+}
+
 export const config = {
   startUrl: process.env.TIKTOK_START_URL || 'https://shop.tiktok.com/br',
   /** Hub de categorias BR (/br/c = diretório tipo “sitemap” no app). Sobrescreva no .env com o link completo se quiser. */
@@ -55,8 +67,19 @@ export const config = {
    * URLs de vitrine por categoria. Ex. Womenswear BR (ID 601152 no path).
    * Query string pode ser omitida no .env — o scraper normaliza pela path.
    */
-  /** Primeira vitrine: Womenswear & Underwear (ID 601152 no path). */
-  categoryUrls: listEnv('TIKTOK_CATEGORY_URLS', 'https://shop.tiktok.com/br/c/womenswear-underwear/601152'),
+  /**
+   * Vitrines explícitas (CSV). Se `TIKTOK_CATEGORY_URLS=` estiver definido mas vazio no .env,
+   * não usa o default — útil com `TIKTOK_SITEMAP_URL` para fila só a partir do hub.
+   */
+  categoryUrls: (() => {
+    if (
+      Object.prototype.hasOwnProperty.call(process.env, 'TIKTOK_CATEGORY_URLS') &&
+      String(process.env.TIKTOK_CATEGORY_URLS ?? '').trim() === ''
+    ) {
+      return [];
+    }
+    return listEnv('TIKTOK_CATEGORY_URLS', 'https://shop.tiktok.com/br/c/womenswear-underwear/601152');
+  })(),
   categoryNames: listEnv('TIKTOK_CATEGORY_NAMES', ''),
   apiUrlIncludes: listEnv(
     'TIKTOK_API_URL_INCLUDES',
@@ -96,4 +119,20 @@ export const config = {
    */
   maxProducts,
   stopAfterPdpOk,
+  /** `null` = sem limite de tempo. */
+  runDurationMs: optionalRunDurationMs(),
+  /**
+   * Amostra de reviews na PDP (texto + URLs de fotos + sku_id). `0` = não gravar reviews.
+   */
+  reviewSampleMaxCount: numEnv('REVIEW_SAMPLE_MAX', 5),
+  reviewSampleMaxText: numEnv('REVIEW_SAMPLE_MAX_TEXT', 320),
+  reviewSampleMaxPhotos: numEnv('REVIEW_SAMPLE_MAX_PHOTOS', 2),
+  /** SKUs completos na PDP (router). Reduza para JSON menor. */
+  pdpSkuOffersMax: numEnv('PDP_SKU_OFFERS_MAX', 120),
+  pdpPropertyMaxProps: numEnv('PDP_PROPERTY_MAX', 24),
+  pdpPropertyMaxValues: numEnv('PDP_PROPERTY_VALUES_MAX', 80),
+  /** Se true, pausa quando detetar CAPTCHA até desaparecer (tens de resolver no browser). */
+  captchaWaitEnabled: boolEnv('CAPTCHA_WAIT', true),
+  /** Máximo de espera pelo CAPTCHA (ms). */
+  captchaMaxWaitMs: numEnv('CAPTCHA_MAX_WAIT_MS', 30 * 60 * 1000),
 };

@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
+import { config } from './config.js';
 import { emptyProduct, mergeProduct } from './productSchema.js';
 import { normalizeShippingEntry } from './shippingExtract.js';
+import {
+  clampProductProperties,
+  clampProductVideo,
+  clampSkuOffers,
+} from './pdpExtrasExtract.js';
+import { clampReviewSamples } from './reviewSampleExtract.js';
 
 function str(v) {
   if (v == null) return '';
@@ -166,6 +173,17 @@ export function normalizeProductRecord(p) {
   }
   out.categories = Array.isArray(p.categories) && p.categories.length ? p.categories : ['uncategorized'];
   out.rank_position = num(p.rank_position);
+  out.review_samples = clampReviewSamples(p.review_samples, {
+    maxReviews: config.reviewSampleMaxCount,
+    maxTextChars: config.reviewSampleMaxText,
+    maxPhotosPerReview: config.reviewSampleMaxPhotos,
+  });
+  out.product_video = clampProductVideo(p.product_video);
+  out.product_properties = clampProductProperties(p.product_properties, {
+    maxProps: config.pdpPropertyMaxProps,
+    maxValuesPerProp: config.pdpPropertyMaxValues,
+  });
+  out.sku_offers = clampSkuOffers(p.sku_offers, { maxRows: config.pdpSkuOffersMax });
   out.shipping = normalizeShippingEntry(p.shipping);
 
   if (!Array.isArray(out.price_history)) out.price_history = [];
