@@ -411,7 +411,7 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         try {
           sniffer.categoriaPaiAtual = taxonomyBase;
           const row = await scrapeProductDetail(page, link, taxonomyBase, sniffer);
-          const sku = String(row.sku || id);
+          const sku = String(id || row.sku);
           scrapedIds.add(sku);
 
           const stPdp = store.upsertLegacy({ ...row, sku }, 'pdp');
