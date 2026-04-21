@@ -500,6 +500,11 @@ async function main() {
       config.stopAfterPdpOk != null ? ` | STOP_AFTER_PDP_OK=${config.stopAfterPdpOk} (parada após N PDPs ok)` : ''
     }`
   );
+  if (config.safeScraping) {
+    console.info(
+      '[run] SAFE_SCRAPING=true — preset conservador (delays/scroll/view-more limitados; vê .env.example). Variáveis explícitas no .env prevalecem.'
+    );
+  }
   console.info(
     runDurationMs == null
       ? '[run] duração: sem limite (até a fila de categorias acabar ou interromper). Defina RUN_DURATION_MINUTES=N para parar após N minutos.'
