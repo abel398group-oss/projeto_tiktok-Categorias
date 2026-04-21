@@ -29,6 +29,14 @@ npm start
 
 Equivale a `node src/index.js`. O `dotenv` carrega o ficheiro `.env` na raiz.
 
+## Só mapear categorias (taxonomia)
+
+```bash
+npm run taxonomy
+```
+
+Gera **`output/categories.json`** com **só categorias master** do Sitemap (links em destaque / bold, não toda a lista de subs). Não altera `produtos.json`. URLs: ver `TAXONOMY_*` e `TIKTOK_SITEMAP_URL` no `.env.example`.
+
 ## Modo mais conservador (menos ritmo agressivo)
 
 No `.env`:
@@ -50,6 +58,7 @@ ULTRA_SAFE_DIAGNOSTIC=true
 ## Onde ver o resultado
 
 - **Catálogo canónico:** `output/produtos.json` (caminho configurável com `OUTPUT_JSON`)
+- **Taxonomia / categorias:** `output/categories.json` (`npm run taxonomy`, `TAXONOMY_OUTPUT_JSON`)
 - **Métricas da corrida:** `output/metrics.json` (`METRICS_JSON_PATH`)
 
 ## Referência completa de opções

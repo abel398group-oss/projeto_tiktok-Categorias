@@ -176,4 +176,15 @@ export const config = {
    * após cada `flush` quando houver alterações (ou sync completo na primeira vez).
    */
   productsDbSync: boolEnv('PRODUCTS_DB_SYNC', false),
+  /**
+   * Extração de taxonomia (`npm run taxonomy`): ficheiro JSON separado de produtos.
+   * URL: TAXONOMY_SITEMAP_URL, senão TIKTOK_SITEMAP_URL, senão o hub BR (/br/c).
+   */
+  taxonomyOutputJson: process.env.TAXONOMY_OUTPUT_JSON || './output/categories.json',
+  taxonomySitemapUrl:
+    (process.env.TAXONOMY_SITEMAP_URL || '').trim() ||
+    (process.env.TIKTOK_SITEMAP_URL || '').trim() ||
+    process.env.TIKTOK_CATEGORY_HUB_URL ||
+    process.env.TIKTOK_START_URL ||
+    'https://shop.tiktok.com/br/c',
 };

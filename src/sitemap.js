@@ -3,6 +3,25 @@ import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { config } from './config.js';
 
 /**
+ * Scroll no hub/sitemap para carregar blocos lazy (reutilizado por coleta plana e taxonomia).
+ * @param {import('puppeteer').Page} page
+ */
+export async function scrollSitemapPageForLazyContent(page) {
+  const scrollRounds = Number(process.env.TIKTOK_HUB_SCROLL_ROUNDS) || 22;
+  for (let r = 0; r < scrollRounds; r += 1) {
+    await page.evaluate(() => {
+      const step = Math.floor(window.innerHeight * (0.7 + Math.random() * 0.25));
+      window.scrollBy({ top: step, left: 0, behavior: 'instant' });
+    });
+    await sleep(randomBetween(400, 900));
+    await page.evaluate(() => {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    });
+    await sleep(randomBetween(500, 1100));
+  }
+}
+
+/**
  * Coleta URLs de categorias a partir de uma página tipo sitemap do TikTok Shop.
  * Heurística: links shop que não são PDP. Faz scroll porque o hub costuma lazy-load.
  * @param {import('puppeteer').Page} page
@@ -16,18 +35,7 @@ export async function collectCategoryUrlsFromSitemapPage(page, sitemapUrl) {
   });
   await sleep(1500);
 
-  const scrollRounds = Number(process.env.TIKTOK_HUB_SCROLL_ROUNDS) || 22;
-  for (let r = 0; r < scrollRounds; r += 1) {
-    await page.evaluate(() => {
-      const step = Math.floor(window.innerHeight * (0.7 + Math.random() * 0.25));
-      window.scrollBy({ top: step, left: 0, behavior: 'instant' });
-    });
-    await sleep(randomBetween(400, 900));
-    await page.evaluate(() => {
-      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
-    });
-    await sleep(randomBetween(500, 1100));
-  }
+  await scrollSitemapPageForLazyContent(page);
 
   const hrefs = await page.evaluate(() => {
     const out = new Set();
