@@ -26,6 +26,21 @@ export class RunMetrics {
     this.categories = [];
     /** @type {Array<Record<string, unknown>>} */
     this.sniffer_debug = [];
+    /** ULTRA_SAFE_DIAGNOSTIC: primeiro PDP ok ISO; contagem de eventos suspeitos (ver `[diag] possible_block`). */
+    this.diagnostic = {
+      first_pdp_at: '',
+      estimated_block_events: 0,
+    };
+  }
+
+  recordPossibleBlock() {
+    this.diagnostic.estimated_block_events += 1;
+  }
+
+  noteFirstPdpOk() {
+    if (!this.diagnostic.first_pdp_at) {
+      this.diagnostic.first_pdp_at = new Date().toISOString();
+    }
   }
 
   /**
@@ -83,6 +98,13 @@ export class RunMetrics {
     };
     if (config.debugScraper && this.sniffer_debug.length) {
       base.sniffer_debug = [...this.sniffer_debug];
+    }
+    if (config.ultraSafeDiagnostic) {
+      base.diagnostic = {
+        first_pdp_at: this.diagnostic.first_pdp_at || null,
+        pdp_count_before_stop: this.extracted.pdp_ok,
+        estimated_block_events: this.diagnostic.estimated_block_events,
+      };
     }
     return base;
   }

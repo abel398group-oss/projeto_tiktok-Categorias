@@ -1285,13 +1285,17 @@ function logPdpRouterSnifferDiag(diag, skuHint) {
  * Abre a PDP por URL (sem voltar pela listagem — evita reordenação do grid).
  * Usa JSON interceptado + complemento no DOM + breadcrumb.
  */
-export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniffer) {
+/**
+ * @param {{ onCaptchaBlockingFirstSeen?: () => void }} [diag] opcional (ULTRA_SAFE_DIAGNOSTIC)
+ */
+export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniffer, diag = null) {
   sniffer.drainBuffer();
 
   await page.goto(pdpUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 });
   await waitIfCaptchaBlocking(page, {
     enabled: config.captchaWaitEnabled,
     maxWaitMs: config.captchaMaxWaitMs,
+    onBlockingFirstSeen: diag?.onCaptchaBlockingFirstSeen,
   });
 
   // Espera conteúdo principal; não falha o fluxo se o seletor mudar.

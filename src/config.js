@@ -8,6 +8,8 @@ function boolEnv(name, defaultValue) {
 
 /** Modo conservador: delays maiores, menos scroll/view-more, menos repetição de categoria, teto de PDP/tempo quando o env não fixa o valor. */
 const safeScraping = boolEnv('SAFE_SCRAPING', false);
+/** Diagnóstico: ritmo mínimo + logs `[diag]` + secção `diagnostic` em metrics (quando env não define o valor, prevalece sobre SAFE). */
+const ultraSafeDiagnostic = boolEnv('ULTRA_SAFE_DIAGNOSTIC', false);
 
 function numEnv(name, defaultValue) {
   const v = process.env[name];
@@ -25,12 +27,16 @@ function listEnv(name, fallbackCsv) {
 }
 
 /**
- * Limite opcional de produtos armazenados (teste rápido). `null` = sem limite.
- * Com `SAFE_SCRAPING=true` e env omitido, `safeDefaultWhenUnset` aplica-se (ex.: teto de catálogo).
+ * Limite opcional (MAX_PRODUCTS, STOP_AFTER_PDP_OK). `null` = sem limite se env omitido.
+ * `ULTRA_SAFE_DIAGNOSTIC` ganha do `SAFE_SCRAPING` quando ambos aplicam default.
  */
-function optionalPositiveIntEnv(name, safeDefaultWhenUnset = null) {
+function optionalPositiveIntEnv(name, ultraDefaultWhenUnset = null, safeDefaultWhenUnset = null) {
   const v = process.env[name];
   if (v === undefined || v === '') {
+    if (ultraSafeDiagnostic && ultraDefaultWhenUnset != null) {
+      const u = Number(ultraDefaultWhenUnset);
+      if (Number.isFinite(u) && u >= 1) return Math.floor(u);
+    }
     if (safeScraping && safeDefaultWhenUnset != null) {
       const s = Number(safeDefaultWhenUnset);
       if (Number.isFinite(s) && s >= 1) return Math.floor(s);
@@ -52,17 +58,19 @@ const outputCsvPathIfEnabled =
     ? ''
     : legacyCsvExplicit || './output/produtos.csv';
 const outputCsv = enableCsv ? outputCsvPathIfEnabled : '';
-const maxProducts = optionalPositiveIntEnv('MAX_PRODUCTS', null);
+const maxProducts = optionalPositiveIntEnv('MAX_PRODUCTS', null, null);
 /** Após N PDPs bem-sucedidos no run, encerra o fluxo com gravação normal (omitir = sem limite). */
-const stopAfterPdpOk = optionalPositiveIntEnv('STOP_AFTER_PDP_OK', 20);
+const stopAfterPdpOk = optionalPositiveIntEnv('STOP_AFTER_PDP_OK', 5, 20);
 
 /**
  * Limite de tempo da corrida inteira. `null` = sem limite (até acabar a fila ou erro).
- * `RUN_DURATION_MINUTES=0` = sem limite. Com `SAFE_SCRAPING=true` e env omitido, default 30 min.
+ * `RUN_DURATION_MINUTES=0` = sem limite.
+ * ULTRA (env omitido): 8 min · SAFE (env omitido): 30 min.
  */
 function optionalRunDurationMs() {
   const raw = process.env.RUN_DURATION_MINUTES;
   if (raw === undefined || String(raw).trim() === '') {
+    if (ultraSafeDiagnostic) return 8 * 60 * 1000;
     if (safeScraping) return 30 * 60 * 1000;
     return null;
   }
@@ -74,6 +82,8 @@ function optionalRunDurationMs() {
 export const config = {
   /** Preset conservador (ritmo / limites); variáveis no .env continuam a prevalecer quando definidas. */
   safeScraping,
+  /** Ultra conservador + diagnóstico no console e em `metrics.json`. */
+  ultraSafeDiagnostic,
   startUrl: process.env.TIKTOK_START_URL || 'https://shop.tiktok.com/br',
   /** Hub de categorias BR (/br/c = diretório tipo “sitemap” no app). Sobrescreva no .env com o link completo se quiser. */
   categoryHubUrl:
@@ -110,14 +120,23 @@ export const config = {
   manualLoginWaitMs: numEnv('MANUAL_LOGIN_WAIT_MS', 180_000),
   /** Intervalo para verificar se a página/sessão já permitem continuar (após login manual). */
   manualLoginPollMs: numEnv('MANUAL_LOGIN_POLL_MS', 1500),
-  categoryDelayMinMs: numEnv('CATEGORY_DELAY_MIN_MS', safeScraping ? 22_000 : 8000),
-  categoryDelayMaxMs: numEnv('CATEGORY_DELAY_MAX_MS', safeScraping ? 60_000 : 25000),
-  viewMoreMaxClicks: numEnv('VIEW_MORE_MAX_CLICKS', safeScraping ? 40 : 200),
-  categoryStagnantPasses: numEnv('CATEGORY_STAGNANT_PASSES', safeScraping ? 2 : 3),
-  pdpDelayMinMs: numEnv('PDP_DELAY_MIN_MS', safeScraping ? 8000 : 2000),
-  pdpDelayMaxMs: numEnv('PDP_DELAY_MAX_MS', safeScraping ? 18_000 : 6000),
-  listScrollMaxRounds: numEnv('LIST_SCROLL_MAX_ROUNDS', safeScraping ? 12 : 28),
-  listScrollIdleLimit: numEnv('LIST_SCROLL_IDLE_LIMIT', safeScraping ? 3 : 4),
+  categoryDelayMinMs: numEnv(
+    'CATEGORY_DELAY_MIN_MS',
+    ultraSafeDiagnostic ? 30_000 : safeScraping ? 22_000 : 8000
+  ),
+  categoryDelayMaxMs: numEnv(
+    'CATEGORY_DELAY_MAX_MS',
+    ultraSafeDiagnostic ? 90_000 : safeScraping ? 60_000 : 25000
+  ),
+  viewMoreMaxClicks: numEnv('VIEW_MORE_MAX_CLICKS', ultraSafeDiagnostic ? 8 : safeScraping ? 40 : 200),
+  categoryStagnantPasses: numEnv(
+    'CATEGORY_STAGNANT_PASSES',
+    ultraSafeDiagnostic ? 1 : safeScraping ? 2 : 3
+  ),
+  pdpDelayMinMs: numEnv('PDP_DELAY_MIN_MS', ultraSafeDiagnostic ? 12_000 : safeScraping ? 8000 : 2000),
+  pdpDelayMaxMs: numEnv('PDP_DELAY_MAX_MS', ultraSafeDiagnostic ? 25_000 : safeScraping ? 18_000 : 6000),
+  listScrollMaxRounds: numEnv('LIST_SCROLL_MAX_ROUNDS', ultraSafeDiagnostic ? 6 : safeScraping ? 12 : 28),
+  listScrollIdleLimit: numEnv('LIST_SCROLL_IDLE_LIMIT', safeScraping || ultraSafeDiagnostic ? 3 : 4),
   tiktokEmail: process.env.TIKTOK_EMAIL || '',
   tiktokPassword: process.env.TIKTOK_PASSWORD || '',
   tryPasswordLogin: boolEnv('TIKTOK_TRY_PASSWORD_LOGIN', false),

@@ -23,6 +23,27 @@ import { extractSsrListingRows } from './ssrCategoryProducts.js';
 import { sleep, randomBetween } from './util.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 
+function diagTs() {
+  return new Date().toISOString();
+}
+
+/** @param {Record<string, unknown>} fields */
+function diagLog(event, fields) {
+  if (!config.ultraSafeDiagnostic) return;
+  console.info(`[diag] ${event}`, { ...fields, timestamp: diagTs() });
+}
+
+/**
+ * @param {'listing' | 'pdp'} stage
+ * @param {import('./runMetrics.js').RunMetrics | null} metrics
+ * @param {Record<string, unknown>} [extra]
+ */
+function emitPossibleBlock(stage, metrics, extra = {}) {
+  if (!config.ultraSafeDiagnostic) return;
+  console.info('[diag] possible_block', { stage, timestamp: diagTs(), ...extra });
+  metrics?.recordPossibleBlock();
+}
+
 /** Resumo seguro de DATABASE_URL para logs (sem password). */
 function pgConnectionHint(connectionString) {
   try {
@@ -292,10 +313,27 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         break;
       }
 
-      await page.goto(categoryUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+      diagLog('entering_listing', { category_url: categoryUrl });
+
+      try {
+        await page.goto(categoryUrl, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+      } catch (e) {
+        emitPossibleBlock('listing', metrics, {
+          hint: 'navigation_error',
+          message: String(e?.message || e).slice(0, 200),
+        });
+        throw e;
+      }
+
       await waitIfCaptchaBlocking(page, {
         enabled: config.captchaWaitEnabled,
         maxWaitMs: config.captchaMaxWaitMs,
+        onBlockingFirstSeen:
+          config.ultraSafeDiagnostic && metrics
+            ? () => {
+                emitPossibleBlock('listing', metrics, { hint: 'captcha_modal' });
+              }
+            : undefined,
       });
       await sleep(randomBetween(2000, 4000));
 
@@ -346,6 +384,8 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         if (stNet.added > 0 || stNet.updated > 0) await persistCanonicalStore(store, pgPool);
       }
 
+      diagLog('after_listing', { ssr_rows: ssrRows.length, network_rows: netRows.length });
+
       if (isProductCapReached(store)) {
         console.info(
           `[test] MAX_PRODUCTS (${config.maxProducts}) atingido após SSR/rede; a saltar PDP nesta passagem.`
@@ -375,7 +415,15 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         console.info(
           `[listagem] nenhuma URL nova (ociosa ${stagnantPasses}/${config.categoryStagnantPasses}); recarregando…`
         );
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 120_000 });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 120_000 });
+        } catch (e) {
+          emitPossibleBlock('listing', metrics, {
+            hint: 'reload_error',
+            message: String(e?.message || e).slice(0, 200),
+          });
+          throw e;
+        }
         await sleep(randomBetween(2000, 3500));
         sniffer.categoriaPaiAtual = taxonomyBase;
         await scrollListingToLoadProducts(page, {
@@ -409,19 +457,30 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
         catPdpAttempts += 1;
         if (metrics) metrics.extracted.pdp_attempts += 1;
         try {
+          diagLog('before_pdp', { product_id: id });
           sniffer.categoriaPaiAtual = taxonomyBase;
-          const row = await scrapeProductDetail(page, link, taxonomyBase, sniffer);
+          const pdpDiag =
+            config.ultraSafeDiagnostic && metrics
+              ? {
+                  onCaptchaBlockingFirstSeen: () => {
+                    emitPossibleBlock('pdp', metrics, { product_id: id, hint: 'captcha_modal' });
+                  },
+                }
+              : null;
+          const row = await scrapeProductDetail(page, link, taxonomyBase, sniffer, pdpDiag);
           const sku = String(id || row.sku);
           scrapedIds.add(sku);
 
           const stPdp = store.upsertLegacy({ ...row, sku }, 'pdp');
           catPdpOk += 1;
           if (metrics) metrics.extracted.pdp_ok += 1;
+          if (metrics) metrics.noteFirstPdpOk();
           if (stPdp.added > 0 || stPdp.updated > 0) await persistCanonicalStore(store, pgPool);
 
           console.info(
             `[pdp] ok sku=${sku} +${stPdp.added} ~${stPdp.updated} | ${(row.nome || '').slice(0, 48)}`
           );
+          diagLog('pdp_ok', { product_id: sku });
 
           if (
             config.stopAfterPdpOk != null &&
@@ -438,6 +497,11 @@ async function scrapeCategoryWithPdpFlow(page, categoryUrl, sniffer, store, metr
           catPdpErr += 1;
           if (metrics) metrics.extracted.pdp_errors += 1;
           console.error(`[pdp] erro ao processar ${link}:`, e?.message || e);
+          emitPossibleBlock('pdp', metrics, {
+            product_id: id,
+            hint: 'pdp_error',
+            message: String(e?.message || e).slice(0, 200),
+          });
         }
 
         await sleep(randomBetween(config.pdpDelayMinMs, config.pdpDelayMaxMs));
@@ -500,7 +564,11 @@ async function main() {
       config.stopAfterPdpOk != null ? ` | STOP_AFTER_PDP_OK=${config.stopAfterPdpOk} (parada após N PDPs ok)` : ''
     }`
   );
-  if (config.safeScraping) {
+  if (config.ultraSafeDiagnostic) {
+    console.info(
+      '[run] ULTRA_SAFE_DIAGNOSTIC=true — defaults mínimos, logs [diag] e campo `diagnostic` em metrics.json. Variáveis no .env prevalecem; defaults deste modo sobrepõem SAFE_SCRAPING.'
+    );
+  } else if (config.safeScraping) {
     console.info(
       '[run] SAFE_SCRAPING=true — preset conservador (delays/scroll/view-more limitados; vê .env.example). Variáveis explícitas no .env prevalecem.'
     );

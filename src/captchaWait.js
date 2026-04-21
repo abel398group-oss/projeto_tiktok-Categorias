@@ -31,10 +31,15 @@ export async function isCaptchaBlocking(page) {
  * ou até `maxWaitMs`. Não resolve o puzzle por ti.
  *
  * @param {import('puppeteer').Page} page
- * @param {{ enabled?: boolean; maxWaitMs?: number; pollMs?: number }} [opts]
+ * @param {{
+ *   enabled?: boolean;
+ *   maxWaitMs?: number;
+ *   pollMs?: number;
+ *   onBlockingFirstSeen?: () => void;
+ * }} [opts]
  */
 export async function waitIfCaptchaBlocking(page, opts = {}) {
-  const { enabled = true, maxWaitMs = 30 * 60 * 1000, pollMs = 1500 } = opts;
+  const { enabled = true, maxWaitMs = 30 * 60 * 1000, pollMs = 1500, onBlockingFirstSeen } = opts;
   if (!enabled) return;
 
   const start = Date.now();
@@ -45,6 +50,13 @@ export async function waitIfCaptchaBlocking(page, opts = {}) {
     if (!blocking) return;
 
     if (!logged) {
+      if (typeof onBlockingFirstSeen === 'function') {
+        try {
+          onBlockingFirstSeen();
+        } catch {
+          /* diagnóstico não deve quebrar o wait */
+        }
+      }
       console.warn(
         '[captcha] Modal de verificação detetado. Resolva no browser (arrastar o puzzle). O scraper aguarda…'
       );
