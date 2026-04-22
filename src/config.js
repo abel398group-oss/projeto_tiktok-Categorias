@@ -187,4 +187,26 @@ export const config = {
     process.env.TIKTOK_CATEGORY_HUB_URL ||
     process.env.TIKTOK_START_URL ||
     'https://shop.tiktok.com/br/c',
+
+  /**
+   * Snapshots do dashboard por categoria master (`npm run master-snapshots`).
+   * Não usa produtos.json nem altera categories.json.
+   */
+  masterSnapshotCategoriesJson:
+    (process.env.MASTER_SNAPSHOT_CATEGORIES_JSON || '').trim() ||
+    process.env.TAXONOMY_OUTPUT_JSON ||
+    './output/categories.json',
+  masterSnapshotOutputJson:
+    process.env.MASTER_SNAPSHOT_OUTPUT_JSON || './output/master_category_snapshots.json',
+  /** Pausa entre visitas a categorias master (ms). */
+  masterSnapshotCategoryDelayMs: numEnv('MASTER_SNAPSHOT_CATEGORY_DELAY_MS', 4500),
+  /** Após networkidle, espera curta antes de ler o SSR. */
+  masterSnapshotPostLoadSleepMs: numEnv('MASTER_SNAPSHOT_POST_LOAD_MS', 1800),
+  /** Limite opcional de masters (testes). Omitir = todas. */
+  masterSnapshotMaxCategories: (() => {
+    const v = process.env.MASTER_SNAPSHOT_MAX_MASTERS;
+    if (v === undefined || String(v).trim() === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null;
+  })(),
 };

@@ -6,7 +6,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "taxonomy": "node src/taxonomyRun.js"
+    "taxonomy": "node src/taxonomyRun.js",
+    "master-snapshots": "node src/masterSnapshotRun.js"
   },
   "engines": {
     "node": ">=18"

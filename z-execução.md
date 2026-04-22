@@ -21,7 +21,7 @@ cp .env.example .env
 
 (No Windows PowerShell pode usar `Copy-Item .env.example .env`.)
 
-## Executar
+## Executar (scraper de produtos — fluxo clássico)
 
 ```bash
 npm start
@@ -29,13 +29,41 @@ npm start
 
 Equivale a `node src/index.js`. O `dotenv` carrega o ficheiro `.env` na raiz.
 
-## Só mapear categorias (taxonomia)
+---
+
+## Taxonomia e snapshots (ficheiros separados de `produtos.json`)
+
+Estes dois comandos **não** usam o pipeline de `npm start` e **não** escrevem em `output/produtos.json` por defeito.
+
+| Comando | Saída | O quê |
+|--------|--------|--------|
+| **`npm run taxonomy`** | `output/categories.json` (ou `TAXONOMY_OUTPUT_JSON`) | Árvore de categorias do Sitemap (masters + subcategorias), fonte estática. |
+| **`npm run master-snapshots`** | `output/master_category_snapshots.json` (ou `MASTER_SNAPSHOT_OUTPUT_JSON`) | Snapshot dinâmico: produtos visíveis no dashboard de **cada categoria master**; lê `categories.json` como entrada. |
+
+Ordem sugerida: primeiro a taxonomia, depois os snapshots (os snapshots dependem de `categories.json` com as masters).
+
+```bash
+npm run taxonomy
+npm run master-snapshots
+```
+
+Variáveis úteis: `TAXONOMY_OUTPUT_JSON`, `TAXONOMY_SITEMAP_URL`, `MASTER_SNAPSHOT_CATEGORIES_JSON`, `MASTER_SNAPSHOT_OUTPUT_JSON`, `MASTER_SNAPSHOT_MAX_MASTERS` (testes) — ver `.env.example`.
+
+### Só mapear categorias (taxonomia)
 
 ```bash
 npm run taxonomy
 ```
 
-Gera **`output/categories.json`** com **só categorias master** do Sitemap (links em destaque / bold, não toda a lista de subs). Não altera `produtos.json`. URLs: ver `TAXONOMY_*` e `TIKTOK_SITEMAP_URL` no `.env.example`.
+Gera **`output/categories.json`** a partir do hub/sitemap. Inclui categorias **master** (nível 1) e **subcategorias** aninhadas em `children`. Não altera `produtos.json`. URLs e paths: `TAXONOMY_*` e `TIKTOK_SITEMAP_URL` no `.env.example`.
+
+### Só snapshot por categoria master
+
+```bash
+npm run master-snapshots
+```
+
+Lê as masters (`level === 1`) de **`categories.json`**, abre cada URL de categoria, grava os produtos do dashboard noutro ficheiro. Ver secção **Onde ver o resultado** abaixo.
 
 ## Modo mais conservador (menos ritmo agressivo)
 
@@ -57,9 +85,10 @@ ULTRA_SAFE_DIAGNOSTIC=true
 
 ## Onde ver o resultado
 
-- **Catálogo canónico:** `output/produtos.json` (caminho configurável com `OUTPUT_JSON`)
-- **Taxonomia / categorias:** `output/categories.json` (`npm run taxonomy`, `TAXONOMY_OUTPUT_JSON`)
-- **Métricas da corrida:** `output/metrics.json` (`METRICS_JSON_PATH`)
+- **Catálogo canónico (fluxo `npm start`):** `output/produtos.json` (`OUTPUT_JSON`)
+- **Taxonomia (árvore de categorias):** `output/categories.json` — **`npm run taxonomy`** — (`TAXONOMY_OUTPUT_JSON`)
+- **Snapshots por master (dashboard, dinâmico):** `output/master_category_snapshots.json` — **`npm run master-snapshots`** — (`MASTER_SNAPSHOT_OUTPUT_JSON`)
+- **Métricas da corrida (`npm start`):** `output/metrics.json` (`METRICS_JSON_PATH`)
 
 ## Referência completa de opções
 
