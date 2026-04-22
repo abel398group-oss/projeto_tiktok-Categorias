@@ -17,6 +17,34 @@ import { extractDashboardProductsFromSsr } from './masterSnapshotSsr.js';
  * @param {unknown} raw
  * @returns {Array<{ name: string; url: string }>}
  */
+/** @param {string} categoryUrl */
+function regionFromCategoryUrl(categoryUrl) {
+  const m = String(categoryUrl || '').match(/shop\.tiktok\.com\/([a-z]{2})\//i);
+  return m ? m[1].toLowerCase() : 'br';
+}
+
+/**
+ * Última linha de defesa se ainda vier URL inválida do browser.
+ * @param {unknown} url
+ * @param {unknown} productId
+ * @param {string} categoryUrl
+ */
+function sanitizeProductUrlOutput(url, productId, categoryUrl) {
+  const u = String(url ?? '').trim();
+  if (
+    u &&
+    !u.includes('[object Object]') &&
+    !u.includes('%5Bobject%20Object%5D') &&
+    /^https:\/\/shop\.tiktok\.com\//i.test(u)
+  ) {
+    return u.split(/[?#]/)[0];
+  }
+  const id = String(productId ?? '').replace(/\D/g, '');
+  if (id.length < 8) return '';
+  const reg = regionFromCategoryUrl(categoryUrl);
+  return `https://shop.tiktok.com/${reg}/pdp/${id}`;
+}
+
 function mastersFromCategoriesJson(raw) {
   if (!raw || typeof raw !== 'object') return [];
   const items = /** @type {Record<string, unknown>} */ (raw).items;
@@ -78,9 +106,43 @@ async function main() {
       });
       await sleep(config.masterSnapshotPostLoadSleepMs);
 
+      if (process.env.MASTER_SNAPSHOT_DEBUG_RAW === '1' && i === 0) {
+        const rawSample = await page.evaluate(() => {
+          const el = document.querySelector('script#__MODERN_ROUTER_DATA__');
+          if (!el?.textContent?.trim()) return null;
+          try {
+            const router = JSON.parse(el.textContent);
+            /** @type {unknown} */
+            let found = null;
+            function walk(o, d) {
+              if (d > 20 || found != null) return;
+              if (!o || typeof o !== 'object') return;
+              const pl = /** @type {Record<string, unknown>} */ (o).productList;
+              const pl2 = /** @type {Record<string, unknown>} */ (o).product_list;
+              for (const arr of [pl, pl2]) {
+                if (Array.isArray(arr) && arr[0] && typeof arr[0] === 'object') {
+                  found = arr[0];
+                  return;
+                }
+              }
+              for (const k of Object.keys(o)) walk(/** @type {Record<string, unknown>} */ (o)[k], d + 1);
+            }
+            walk(router, 0);
+            return found ? JSON.stringify(found, null, 2) : null;
+          } catch {
+            return null;
+          }
+        });
+        if (rawSample) {
+          console.info('[debug product raw]', rawSample.slice(0, 8000));
+        }
+      }
+
       const rows = await extractDashboardProductsFromSsr(page);
       for (const row of rows) {
         const r = /** @type {Record<string, unknown>} */ (row);
+        const pid = String(r.product_id ?? '');
+        const purl = sanitizeProductUrlOutput(r.product_url, pid, cat.url);
         items.push({
           run_id: runId,
           snapshot_at: snapshotAt,
@@ -88,14 +150,14 @@ async function main() {
           category_name: cat.name,
           category_url: cat.url,
           dashboard_rank: r.dashboard_rank ?? null,
-          product_id: r.product_id ?? '',
-          product_url: r.product_url ?? '',
+          product_id: pid,
+          product_url: purl,
           name: r.name ?? '',
           price_current:
             typeof r.price_current === 'number' && isFinite(r.price_current)
               ? r.price_current
               : 0,
-          shop_name: r.shop_name ?? '',
+          shop_name: String(r.shop_name ?? '').trim(),
           image_main: r.image_main ?? '',
         });
       }
@@ -119,6 +181,22 @@ async function main() {
 
     await fs.mkdir(path.dirname(outPath), { recursive: true });
     await writeFileAtomic(outPath, JSON.stringify(payload, null, 2), 'utf8');
+    let urlsValidas = 0;
+    let shopNamesPreenchidos = 0;
+    for (const it of items) {
+      const u = String(/** @type {Record<string, unknown>} */ (it).product_url || '');
+      if (u.startsWith('https://shop.tiktok.com') && !u.includes('[object Object]')) {
+        urlsValidas += 1;
+      }
+      if (String(/** @type {Record<string, unknown>} */ (it).shop_name || '').trim()) {
+        shopNamesPreenchidos += 1;
+      }
+    }
+    console.info('[validação]', {
+      urls_validas: urlsValidas,
+      shop_names_preenchidos: shopNamesPreenchidos,
+      total_linhas: items.length,
+    });
     console.info(
       `[master-snapshots] concluído: ${items.length} linhas de produto (${masters.length} masters).`,
     );

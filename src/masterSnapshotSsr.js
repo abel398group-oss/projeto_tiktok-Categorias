@@ -19,9 +19,62 @@ export async function extractDashboardProductsFromSsr(page) {
       return (m && m[1] ? m[1] : 'br').toLowerCase();
     }
 
-    /** @param {string} productId */
+    /**
+     * Garante id string numérica (nunca objeto em template string).
+     * @param {unknown} productId
+     */
+    function safeProductIdString(productId) {
+      if (productId == null) return '';
+      if (typeof productId === 'string' && /^\d{8,}$/.test(productId.trim())) return productId.trim();
+      if (typeof productId === 'number' && isFinite(productId)) return String(Math.trunc(productId));
+      const s = String(productId).replace(/\D/g, '');
+      return s.length >= 8 ? s : String(productId ?? '').trim();
+    }
+
+    /** @param {unknown} productId */
     function regionalPdpUrl(productId) {
-      return `https://shop.tiktok.com/${pathRegion()}/pdp/${productId}`;
+      const sid = safeProductIdString(productId);
+      if (!/^\d{8,}$/.test(sid)) return '';
+      return `https://shop.tiktok.com/${pathRegion()}/pdp/${sid}`;
+    }
+
+    /**
+     * URL real: nunca fazer String(obj) (vira "[object Object]" e estoura o pathname).
+     * @param {unknown} x
+     * @returns {string}
+     */
+    function urlStringFromField(x) {
+      if (x == null) return '';
+      if (typeof x === 'string') {
+        const t = x.trim();
+        return t && t !== '[object Object]' ? t : '';
+      }
+      if (typeof x === 'object') {
+        const o = /** @type {Record<string, unknown>} */ (x);
+        const inner = [
+          o.url,
+          o.href,
+          o.link,
+          o.uri,
+          o.path,
+          o.jump_url,
+          o.jumpUrl,
+          o.detail_url,
+          o.detailUrl,
+          o.web_url,
+          o.webUrl,
+          o.seo_url,
+          o.seoUrl,
+          o.pdp_url,
+          o.pdpUrl,
+          o.product_url,
+          o.productUrl,
+        ];
+        for (const v of inner) {
+          if (typeof v === 'string' && v.trim() && v.trim() !== '[object Object]') return v.trim();
+        }
+      }
+      return '';
     }
 
     /**
@@ -30,7 +83,7 @@ export async function extractDashboardProductsFromSsr(page) {
      * @param {string} productId
      */
     function normalizeProductUrlCandidate(raw, productId) {
-      if (!raw || !String(raw).trim()) return '';
+      if (!raw || !String(raw).trim() || raw.trim() === '[object Object]') return '';
       let s = String(raw).trim();
       if (s.startsWith('//')) s = `https:${s}`;
       else if (s.startsWith('/')) s = `https://shop.tiktok.com${s}`;
@@ -57,23 +110,35 @@ export async function extractDashboardProductsFromSsr(page) {
      * @param {string} id
      */
     function pickLink(p, id) {
-      const ordered = [
+      const candidates = [
+        p.url,
+        p.link,
+        p.jump_url,
+        p.jumpUrl,
+        p.detail_url,
+        p.detailUrl,
         p.pdp_url,
         p.pdpUrl,
         p.seo_url,
         p.seoUrl,
         p.product_url,
         p.productUrl,
+        p.web_url,
+        p.webUrl,
       ];
-      for (const x of ordered) {
-        const u = normalizeProductUrlCandidate(x ? String(x).trim() : '', id);
+      for (const x of candidates) {
+        const str = urlStringFromField(x);
+        if (!str) continue;
+        const u = normalizeProductUrlCandidate(str, id);
         if (u && /\/pdp\//i.test(u)) return u;
       }
-      for (const x of ordered) {
-        const u = normalizeProductUrlCandidate(x ? String(x).trim() : '', id);
-        if (u && !/\/view\/product\//i.test(u)) return u;
+      for (const x of candidates) {
+        const str = urlStringFromField(x);
+        if (!str) continue;
+        const u = normalizeProductUrlCandidate(str, id);
+        if (u && !/\/view\/product\//i.test(u) && u.includes('tiktok.com')) return u;
       }
-      return regionalPdpUrl(id);
+      return regionalPdpUrl(id) || `https://shop.tiktok.com/${pathRegion()}/pdp/${id}`;
     }
 
     /** @param {unknown} ppi */
@@ -121,51 +186,124 @@ export async function extractDashboardProductsFromSsr(page) {
       return '';
     }
 
+    /** @param {unknown} v */
+    function strClean(v) {
+      if (v == null) return '';
+      if (typeof v === 'string') return v.replace(/\s+/g, ' ').trim();
+      if (typeof v === 'number' && isFinite(v)) return String(v);
+      if (typeof v === 'object') return '';
+      return String(v).replace(/\s+/g, ' ').trim();
+    }
+
+    /**
+     * @param {Record<string, unknown> | null | undefined} o
+     * @param {string[]} keys
+     */
+    function pickFromKeys(o, keys) {
+      if (!o || typeof o !== 'object') return '';
+      for (const k of keys) {
+        const t = strClean(/** @type {Record<string, unknown>} */ (o)[k]);
+        if (t) return t;
+      }
+      return '';
+    }
+
     /** @param {Record<string, unknown>} p */
     function shopNameFrom(p) {
+      let t = pickFromKeys(p, [
+        'shop_name',
+        'shopName',
+        'seller_name',
+        'sellerName',
+        'store_name',
+        'storeName',
+        'shop_title',
+        'shopTitle',
+      ]);
+      if (t) return t;
+
+      const pinfoRaw = p.product_info || p.productInfo;
       const pinfo =
-        (p.product_info || p.productInfo) && typeof (p.product_info || p.productInfo) === 'object'
-          ? /** @type {Record<string, unknown>} */ (p.product_info || p.productInfo)
+        pinfoRaw && typeof pinfoRaw === 'object'
+          ? /** @type {Record<string, unknown>} */ (pinfoRaw)
           : p;
+
+      t = pickFromKeys(pinfo, [
+        'shop_name',
+        'shopName',
+        'seller_name',
+        'sellerName',
+        'store_name',
+        'storeName',
+      ]);
+      if (t) return t;
+
       const sm = pinfo.seller_model || pinfo.sellerModel || p.seller_model || p.sellerModel;
       if (sm && typeof sm === 'object') {
-        const sn = String(
-          /** @type {Record<string, unknown>} */ (sm).shop_name ||
-            /** @type {Record<string, unknown>} */ (sm).shopName ||
-            ''
-        ).trim();
-        if (sn) return sn;
+        t = pickFromKeys(/** @type {Record<string, unknown>} */ (sm), [
+          'shop_name',
+          'shopName',
+          'seller_name',
+          'sellerName',
+          'name',
+        ]);
+        if (t) return t;
       }
+
       const sinfo = pinfo.shop_info || pinfo.shopInfo || p.shop_info || p.shopInfo;
       if (sinfo && typeof sinfo === 'object') {
-        const sn = String(
-          /** @type {Record<string, unknown>} */ (sinfo).shop_name ||
-            /** @type {Record<string, unknown>} */ (sinfo).shopName ||
-            ''
-        ).trim();
-        if (sn) return sn;
+        t = pickFromKeys(/** @type {Record<string, unknown>} */ (sinfo), [
+          'shop_name',
+          'shopName',
+          'seller_name',
+          'sellerName',
+        ]);
+        if (t) return t;
       }
+
+      const userInfo = p.user_info || p.userInfo;
+      if (userInfo && typeof userInfo === 'object') {
+        t = pickFromKeys(/** @type {Record<string, unknown>} */ (userInfo), [
+          'shop_name',
+          'shopName',
+          'seller_name',
+          'nickname',
+          'store_name',
+        ]);
+        if (t) return t;
+      }
+
+      const sel = pinfo.seller || pinfo.seller_info || pinfo.sellerInfo || p.seller;
+      if (sel && typeof sel === 'object') {
+        t = pickFromKeys(/** @type {Record<string, unknown>} */ (sel), [
+          'shop_name',
+          'shopName',
+          'name',
+          'seller_name',
+          'sellerName',
+        ]);
+        if (t) return t;
+      }
+
       const mkt = p.product_marketing_info || p.productMarketingInfo;
       if (mkt && typeof mkt === 'object') {
-        const sellerName = String(
-          /** @type {Record<string, unknown>} */ (mkt).seller_name ||
-            /** @type {Record<string, unknown>} */ (mkt).sellerName ||
-            /** @type {Record<string, unknown>} */ (mkt).shop_name ||
-            ''
-        ).trim();
-        if (sellerName) return sellerName;
+        t = pickFromKeys(/** @type {Record<string, unknown>} */ (mkt), [
+          'seller_name',
+          'sellerName',
+          'shop_name',
+          'shopName',
+        ]);
+        if (t) return t;
       }
+
       return '';
     }
 
     /** @param {unknown} o */
     function isProductish(o) {
       if (!o || typeof o !== 'object') return false;
-      const id = String(
-        /** @type {Record<string, unknown>} */ (o).product_id ??
-          /** @type {Record<string, unknown>} */ (o).productId ??
-          ''
-      ).trim();
+      const pr = /** @type {Record<string, unknown>} */ (o);
+      const id = safeProductIdString(pr.product_id ?? pr.productId);
       return /^\d{8,}$/.test(id);
     }
 
@@ -218,8 +356,8 @@ export async function extractDashboardProductsFromSsr(page) {
           for (const item of pl) {
             if (!isProductish(item)) continue;
             const p = /** @type {Record<string, unknown>} */ (item);
-            const id = String(p.product_id ?? p.productId ?? '').trim();
-            if (seen.has(id)) continue;
+            const id = safeProductIdString(p.product_id ?? p.productId);
+            if (!/^\d{8,}$/.test(id) || seen.has(id)) continue;
             seen.add(id);
             acc.push(item);
           }
@@ -265,6 +403,7 @@ export async function extractDashboardProductsFromSsr(page) {
           .split('\n')[0]
           .slice(0, 400);
         let img = '';
+        let shopNameDom = '';
         let el = elA;
         for (let up = 0; up < 8 && el; up++) {
           el = el.parentElement;
@@ -275,14 +414,23 @@ export async function extractDashboardProductsFromSsr(page) {
           if (im && /** @type {HTMLImageElement} */ (im).src) {
             img = /** @type {HTMLImageElement} */ (im).src.split('?')[0];
           }
+          if (!shopNameDom) {
+            const storeA = el.querySelector('a[href*="/store/"]');
+            if (storeA) {
+              shopNameDom = (storeA.textContent || storeA.getAttribute('aria-label') || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 300);
+            }
+          }
         }
         rows.push({
           dashboard_rank: rows.length + 1,
           product_id: id,
-          product_url: productUrl,
+          product_url: productUrl || regionalPdpUrl(id),
           name,
           price_current: 0,
-          shop_name: '',
+          shop_name: shopNameDom,
           image_main: img,
         });
       }
@@ -296,14 +444,19 @@ export async function extractDashboardProductsFromSsr(page) {
       for (const item of list) {
         if (!isProductish(item)) continue;
         const p = /** @type {Record<string, unknown>} */ (item);
-        const id = String(p.product_id ?? p.productId ?? '').trim();
+        const id = safeProductIdString(p.product_id ?? p.productId);
+        if (!/^\d{8,}$/.test(id)) continue;
         rank += 1;
         const pinfo = p.product_price_info ?? p.productPriceInfo;
         const name = String(p.title ?? p.name ?? p.product_name ?? '').trim();
+        let pUrl = pickLink(p, id);
+        if (!pUrl || pUrl.includes('[object Object]') || pUrl.includes('%5Bobject%20Object%5D')) {
+          pUrl = regionalPdpUrl(id) || `https://shop.tiktok.com/${pathRegion()}/pdp/${id}`;
+        }
         out.push({
           dashboard_rank: rank,
           product_id: id,
-          product_url: pickLink(p, id),
+          product_url: pUrl,
           name,
           price_current: priceToNumber(
             pinfo && typeof pinfo === 'object' ? pinfo : undefined
