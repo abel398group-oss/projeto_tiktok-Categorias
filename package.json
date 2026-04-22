@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "taxonomy": "node src/taxonomyRun.js",
-    "master-snapshots": "node src/masterSnapshotRun.js"
+    "master-snapshots": "node src/masterSnapshotRun.js",
+    "verify-snapshot-pdp": "node src/verifySnapshotPdp.js"
   },
   "engines": {
     "node": ">=18"

@@ -1,9 +1,8 @@
 /**
  * Extrai produtos visíveis no dashboard de uma categoria master.
- * 1) __MODERN_ROUTER_DATA__ — maior lista productList / product_list / products.
- * 2) Fallback: âncoras no DOM (href pode vir como /view/product/… — normalizamos para /{região}/pdp/{id}).
- *
- * Snapshot: ordem e itens mudam a cada carga.
+ * 1) DOM do cartão (vitrine) — preço, “de” riscado, %, frete, vendidos como na tela.
+ * 2) __MODERN_ROUTER_DATA__ — preenche campos em falta (imagem, loja, ratings, etc.).
+ * 3) Se não houver cartões com âncora: só SSR. Se SSR falhar, DOM parcial.
  */
 
 /**
@@ -153,34 +152,104 @@ export async function extractDashboardProductsFromSsr(page) {
       return isFinite(x) && x >= 0 ? x : null;
     }
 
-    /** @param {unknown} ppi */
-    function priceToNumber(ppi) {
-      if (!ppi || typeof ppi !== 'object') return 0;
+    /**
+     * "R$ 1.234,56" (milhar BR) e "R$ 74,92" — para texto visível do cartão.
+     * @param {string} raw
+     * @returns {number | null}
+     */
+    function parseBrVisibleMoneyString(raw) {
+      const t = String(raw)
+        .replace(/R\$\s*/i, '')
+        .trim()
+        .replace(/[^\d.,]/g, '');
+      if (!t) return null;
+      if (/^\d{1,3}(?:\.\d{3})+,\d{1,2}$/.test(t)) {
+        const x = parseFloat(t.replace(/\./g, '').replace(',', '.'));
+        return isFinite(x) && x >= 0 ? x : null;
+      }
+      if (/\d+,\d{1,2}$/.test(t)) {
+        const x = parseFloat(t.replace(/\./g, '').replace(',', '.'));
+        return isFinite(x) && x >= 0 ? x : null;
+      }
+      if (/^\d+\.\d{2}$/.test(t) && t.indexOf(',') < 0) {
+        const x = parseFloat(t);
+        return isFinite(x) && x >= 0 ? x : null;
+      }
+      return parseMoneyToNumber('R$ ' + t);
+    }
+
+    /**
+     * Alinhado a `productExtract.pickPrecoAtual`: evita pegar só `min_price.sale_price_decimal`
+     * (mínimo entre variantes, ex. 104,9) e ignorar `real_time_price` / `price_current` (PDP, ex. 109,9).
+     * @param {unknown} ppi product_price_info
+     * @param {Record<string, unknown> | null} [root] nó do produto (card / feed)
+     */
+    function priceToNumber(ppi, root) {
       function num(v) {
         return parseMoneyToNumber(v);
       }
-      const p = /** @type {Record<string, unknown>} */ (ppi);
-      let n;
-      const min = p.min_price ?? p.minPrice;
-      if (min && typeof min === 'object') {
-        const m = /** @type {Record<string, unknown>} */ (min);
-        n =
-          num(m.sale_price_decimal) ||
-          num(m.single_product_price_decimal) ||
-          num(m.min_sale_price) ||
-          num(m.price_val);
+      const p = ppi && typeof ppi === 'object' ? /** @type {Record<string, unknown>} */ (ppi) : null;
+      const r = root && typeof root === 'object' ? root : null;
+      if (!p && !r) return 0;
+      const pBase = r
+        ? (r.product_base && typeof r.product_base === 'object' ? r.product_base : r.productBase)
+        : null;
+      const pb =
+        pBase && typeof pBase === 'object' && pBase !== null
+          ? /** @type {Record<string, unknown>} */ (pBase).price
+          : null;
+      const priceB = pb && typeof pb === 'object' ? /** @type {Record<string, unknown>} */ (pb) : null;
+
+      /** @type {number | null} */
+      let n = null;
+      if (p) {
+        n = num(p.discount_price_decimal) || num(p.discount_price);
+        if (n != null) return n;
+        n = num(p.real_time_price);
+        if (n != null) return n;
+        n = num(p.sale_price_format) || num(p.format_discount_price) || num(p.sale_price_integer_part_format);
+        if (n != null) return n;
+        n = num(p.price_current) || num(p.show_price) || num(p.format_price) || num(p.price_text);
         if (n != null) return n;
       }
-      n =
-        num(p.discount_price_decimal) ||
-        num(p.discount_price) ||
-        num(p.sale_price_decimal) ||
-        num(p.sale_price);
-      if (n != null) return n;
-      n = num(p.price_current) ?? num(p.price);
-      if (n != null) return n;
-      n = num(p.sale_price_format) ?? num(p.price_text);
-      return n != null ? n : 0;
+      if (r) {
+        n = num(r.discount_price) || num(r.sale_price) || num(r.min_sale_price);
+        if (n != null) return n;
+        n = num(r.real_time_price);
+        if (n != null) return n;
+        n = num(r.price_current) || num(r.display_price) || num(r.current_price) || num(r.price);
+        if (n != null) return n;
+      }
+      if (priceB) {
+        n =
+          num(priceB.discount_price) ||
+          num(priceB.sale_price) ||
+          num(priceB.real_price) ||
+          num(priceB.current_price) ||
+          num(priceB.min_sku_price);
+        if (n != null) return n;
+      }
+      if (p) {
+        const min = p.min_price ?? p.minPrice;
+        if (min && typeof min === 'object') {
+          const m = /** @type {Record<string, unknown>} */ (min);
+          n =
+            num(m.real_time_price) ||
+            num(m.real_time_sale_price) ||
+            num(m.real_price_decimal) ||
+            num(m.real_price) ||
+            num(m.sale_price_decimal) ||
+            num(m.single_product_price_decimal) ||
+            num(m.min_sale_price) ||
+            num(m.price_val);
+          if (n != null) return n;
+        }
+        n = num(p.sale_price_decimal) || num(p.sale_price) || num(p.price);
+        if (n != null) return n;
+        n = num(p.sale_price_format) || num(p.price_text);
+        if (n != null) return n;
+      }
+      return 0;
     }
 
     /**
@@ -273,7 +342,7 @@ export async function extractDashboardProductsFromSsr(page) {
         }
       }
 
-      const current = priceToNumber(ppi);
+      const current = priceToNumber(ppi, p);
       if (price_original != null && current > 0 && price_original > current) {
         if (discount_percent == null) {
           discount_percent = Math.max(0, Math.min(100, Math.round(100 * (1 - current / price_original))));
@@ -410,7 +479,36 @@ export async function extractDashboardProductsFromSsr(page) {
     }
 
     /**
-     * "45,3K", "3.1k vendido(s)", "15270" → inteiro. Alinha ao que a UI mostra com sufixo K/M.
+     * @param {string} chunk
+     * @returns {number | null}
+     */
+    function parseSoldMagnitudeToken(chunk) {
+      const t0 = String(chunk).trim();
+      if (!t0) return null;
+      const kmb = t0.match(/^([\d.,]+)\s*([kKmM])$/i);
+      if (kmb) {
+        const part = kmb[1].trim();
+        const suf = kmb[2].toLowerCase();
+        let p = part;
+        if (/^\d+,\d{1,3}$/.test(p) && !/\./.test(p)) p = p.replace(',', '.');
+        else if (/^\d{1,3}(?:\.\d{3})+,\d{2}$/.test(p)) p = p.replace(/\./g, '').replace(',', '.');
+        else if (/^\d{1,3}(?:\.\d{3})+$/.test(p)) p = p.replace(/\./g, '');
+        const n0 = parseFloat(p);
+        if (!Number.isFinite(n0) || n0 < 0) return null;
+        const mult = suf === 'k' ? 1000 : suf === 'm' ? 1_000_000 : 1_000_000_000;
+        return Math.floor(n0 * mult);
+      }
+      let t = t0;
+      if (/^\d+,\d{1,3}$/.test(t) && !/\./.test(t)) t = t.replace(',', '.');
+      else if (/^\d{1,3}(?:\.\d{3})+,\d{2}$/.test(t)) t = t.replace(/\./g, '').replace(',', '.');
+      else if (/^\d{1,3}(?:\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+      const n = parseFloat(t);
+      if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+      return null;
+    }
+
+    /**
+     * "45,3K", "1 vendido(s)", "15270" → inteiro. Não cola todos os dígitos se houver R$ e % (evita 53103510).
      * @param {unknown} v
      * @returns {number | null}
      */
@@ -421,31 +519,42 @@ export async function extractDashboardProductsFromSsr(page) {
         .replace(/[\u00a0\u202f]/g, ' ');
       if (!s0) return null;
 
-      const kmb = s0.match(/([\d.,]+)\s*([kKmM])/i);
+      // Número imediatamente antes de "vendido(s)" / "vendidos"
+      const mBeforeV = s0.match(
+        /(?:^|[^\d.,%R$€])([\d.,]+[KkMm]?)\s*\+?\s*vendidos?(?:\([^)]*\))?/i
+      );
+      if (mBeforeV) {
+        const n = parseSoldMagnitudeToken(mBeforeV[1]);
+        if (n != null) return n;
+      }
+      // "vendidos: 10"
+      const mAfterV = s0.match(
+        /\bvendidos?(?:\([^)]*\))?\s*[:·\-]?\s*([\d.,]+[KkMm]?)(?![\d.,]*%)/i
+      );
+      if (mAfterV) {
+        const n = parseSoldMagnitudeToken(mAfterV[1]);
+        if (n != null) return n;
+      }
+
+      const kmb = s0.match(/([\d.,]+)\s*([kKmM])\b/i);
       if (kmb) {
-        const part = kmb[1].trim();
-        const suf = kmb[2].toLowerCase();
-        let p = part;
-        if (/^\d+,\d{1,3}$/.test(p) && !/\./.test(p)) p = p.replace(',', '.');
-        else if (/^\d{1,3}(?:\.\d{3})+$/.test(p)) p = p.replace(/\./g, '');
-        const n0 = parseFloat(p);
-        if (!Number.isFinite(n0) || n0 < 0) return null;
-        const mult = suf === 'k' ? 1000 : suf === 'm' ? 1_000_000 : 1_000_000_000;
-        return Math.floor(n0 * mult);
+        const n = parseSoldMagnitudeToken(String(kmb[1]).trim() + kmb[2]);
+        if (n != null) return n;
       }
 
       if (/\b(mil|thousand)\b/i.test(s0)) {
         const m2 = s0.match(/([\d.,]+)\s*(?:mil|thousand)/i);
         if (m2) {
-          let p2 = m2[1].trim();
-          if (/^\d+,\d{1,2}$/.test(p2) && !/\./.test(p2)) p2 = p2.replace(',', '.');
-          const n2 = parseFloat(p2);
-          if (Number.isFinite(n2) && n2 >= 0) return Math.floor(n2 * 1000);
+          const n2 = parseSoldMagnitudeToken(m2[1]);
+          if (n2 != null) return n2;
         }
       }
 
+      if (/%/i.test(s0) || /R\$\s*[\d.,]/i.test(s0)) {
+        return null;
+      }
       const digits = s0.replace(/[^\d]/g, '');
-      if (digits.length >= 1) {
+      if (digits.length >= 1 && digits.length <= 9) {
         const n = parseInt(digits, 10);
         if (Number.isFinite(n) && n >= 0) return n;
       }
@@ -630,11 +739,23 @@ export async function extractDashboardProductsFromSsr(page) {
         return Number.isFinite(n) ? n : null;
       }
 
+      /** "2000" | "2.0K" (API) → inteiro. Reutiliza o mesmo K/M que `format_sold_count`. */
+      function reviewCountFromField(/** @type {unknown} */ v) {
+        if (v == null || v === '') return null;
+        if (typeof v === 'number' && isFinite(v)) return Math.max(0, Math.floor(v));
+        const s = String(v).trim();
+        const fromScaled = parseSoldCountFromDisplayText(s);
+        if (fromScaled != null) return Math.max(0, Math.floor(fromScaled));
+        const n = numOrNull(s);
+        if (n != null) return Math.max(0, Math.floor(n));
+        return null;
+      }
+
       function applyReviewModel(/** @type {Record<string, unknown>} */ rm) {
         if (rating_count == null) {
           const rc = rm.product_review_count ?? rm.productReviewCount;
-          const n = numOrNull(rc);
-          if (n != null) rating_count = Math.max(0, Math.floor(n));
+          const n = reviewCountFromField(rc);
+          if (n != null) rating_count = n;
         }
         if (rating == null) {
           const os = rm.product_overall_score ?? rm.productOverallScore;
@@ -666,8 +787,8 @@ export async function extractDashboardProductsFromSsr(page) {
         }
         if (rating_count == null) {
           const rc = r.review_count ?? r.reviewCount;
-          const n = numOrNull(rc);
-          if (n != null) rating_count = Math.max(0, Math.floor(n));
+          const n = reviewCountFromField(rc);
+          if (n != null) rating_count = n;
         }
       }
 
@@ -720,8 +841,8 @@ export async function extractDashboardProductsFromSsr(page) {
         if (mkt && typeof mkt === 'object') {
           const m = /** @type {Record<string, unknown>} */ (mkt);
           const rc = m.review_count ?? m.reviewCount;
-          const n = numOrNull(rc);
-          if (n != null) rating_count = Math.max(0, Math.floor(n));
+          const n = reviewCountFromField(rc);
+          if (n != null) rating_count = n;
         }
       }
 
@@ -729,7 +850,8 @@ export async function extractDashboardProductsFromSsr(page) {
     }
 
     /**
-     * Cartão: “4,3 ★ (465)” / “5★(6)”.
+     * Cartão/PDP: “4,3 ★ (465)”, “5★(6)”, “4.3 ★ (2.0K)”.
+     * Entre parênteses, K/M como em vendas: “2.0K” → 2000 (evita tratar “2.0K” como só o dígito 2).
      * @param {Element} anchor
      * @returns {{ rating: number | null; rating_count: number | null; rating_distribution: null }}
      */
@@ -737,11 +859,16 @@ export async function extractDashboardProductsFromSsr(page) {
       let el = /** @type {HTMLElement | null} */ (anchor);
       for (let up = 0; up < 12 && el; up++) {
         const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
-        const m = block.match(/(\d+[.,]?\d*)\s*★\s*\((\d[\d.,\s]*)\)/);
+        const m = block.match(/(\d+[.,]?\d*)\s*★\s*\(([^)]+)\)/i);
         if (m) {
           const r = parseFloat(m[1].replace(',', '.'));
-          const c = parseInt(String(m[2]).replace(/[^\d]/g, ''), 10);
-          if (Number.isFinite(r) && r >= 0 && r <= 5 && Number.isFinite(c) && c >= 0) {
+          const inner = m[2].trim();
+          let c = parseSoldCountFromDisplayText(inner);
+          if (c == null) {
+            const d = parseInt(inner.replace(/[^\d]/g, ''), 10);
+            c = Number.isFinite(d) && d >= 0 ? d : null;
+          }
+          if (Number.isFinite(r) && r >= 0 && r <= 5 && c != null) {
             return { rating: r, rating_count: c, rating_distribution: null };
           }
         }
@@ -1111,6 +1238,208 @@ export async function extractDashboardProductsFromSsr(page) {
     }
 
     /**
+     * Nó mínimo que engloba preço + resto do cartão.
+     * @param {HTMLElement} anchor
+     * @returns {HTMLElement}
+     */
+    function getCardContainer(/** @type {HTMLElement} */ anchor) {
+      let el = anchor.parentElement;
+      for (let up = 0; up < 12 && el; up += 1) {
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
+        if (/\bR\$\s*[\d.,]+/i.test(text) && text.length > 10) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+      return anchor;
+    }
+
+    /**
+     * Remove linhas de frete para não confundir preço de envio (ex. R$ 2,00) com preço do produto.
+     * @param {string} full
+     */
+    function stripFretePortions(/** @type {string} */ full) {
+      return full
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((L) => {
+          if (!L) return true;
+          if (/^frete\s/i.test(L)) return false;
+          if (/\bfrete\s+r\$/i.test(L)) return false;
+          if (/neste pedido/i.test(L) && /frete/i.test(L)) return false;
+          if (/^shipping\b/i.test(L)) return false;
+          return true;
+        })
+        .join('\n');
+    }
+
+    /**
+     * @param {HTMLElement} card
+     * @returns {{ price_current: number; price_original: number | null; discount_percent: number | null }}
+     */
+    function parseCardVisualFinancials(/** @type {HTMLElement} */ card) {
+      const forMoney = stripFretePortions(card.innerText || card.textContent || '');
+      let price_original = null;
+      const strikeSel = 's, del, [class*="line-through"], [class*="strikethrough"], [class*="lineThrough"]';
+      card.querySelectorAll(strikeSel).forEach((node) => {
+        const t = (node.textContent || '').trim();
+        const mm = t.match(/R\$\s*[\d.,]+/i);
+        if (mm) {
+          const n = parseBrVisibleMoneyString(mm[0]);
+          if (n != null && n > 0) price_original = n;
+        }
+      });
+      const discountM = forMoney.match(/[\-–—]\s*(\d{1,2})\s*%/i);
+      let discount_percent = discountM != null ? parseInt(discountM[1], 10) : null;
+      if (discount_percent == null) {
+        const m2 = forMoney.match(/(\d{1,2})\s*%\s*off/i);
+        if (m2) discount_percent = parseInt(m2[1], 10);
+      }
+      const moneys = [];
+      for (const m of forMoney.matchAll(/R\$\s*[\d.,]+/gi)) {
+        const n = parseBrVisibleMoneyString(m[0]);
+        if (n != null && n > 0) moneys.push(n);
+      }
+      const uniq = [...new Set(moneys)].sort((a, b) => a - b);
+      let price_current = 0;
+      if (price_original != null) {
+        const below = uniq.filter((x) => x < price_original);
+        if (below.length) {
+          price_current = below[below.length - 1];
+        } else {
+          const le = uniq.filter((x) => x <= price_original);
+          if (le.length) price_current = Math.min(...le);
+        }
+        if (price_current === 0) {
+          const rest = uniq.filter((x) => x !== price_original);
+          if (rest.length) price_current = Math.min(...rest);
+        }
+        if (price_current === 0) price_current = price_original;
+      } else if (uniq.length >= 2) {
+        const mn = Math.min(...uniq);
+        const mx = Math.max(...uniq);
+        if (mx > mn) {
+          price_current = mn;
+          price_original = mx;
+        } else {
+          price_current = mx;
+        }
+        if (discount_percent == null && price_original && price_current > 0 && price_original > price_current) {
+          discount_percent = Math.max(
+            0,
+            Math.min(100, Math.round(100 * (1 - price_current / price_original)))
+          );
+        }
+      } else if (uniq.length === 1) {
+        price_current = uniq[0];
+        price_original = null;
+        if (discountM == null) discount_percent = null;
+      }
+      if (discountM != null && discountM[1] != null) {
+        discount_percent = parseInt(discountM[1], 10);
+      }
+      return { price_current, price_original, discount_percent };
+    }
+
+    /**
+     * @param {string} block
+     * @returns {{ sold_text: string; sold_count: number | null }}
+     */
+    /**
+     * Remove lixo após a frase de vendas (no mesmo nó o TikTok cola -10%, R$ …).
+     * @param {string} s
+     */
+    function clipSoldTextToVendorPhrase(/** @type {string} */ s) {
+      const t = String(s).trim();
+      if (!t) return t;
+      const cut = t.search(/\s*[\-–—]\s*\d{1,2}\s*%\s*R?\$?/i);
+      if (cut > 0) return t.slice(0, cut).trim();
+      const cut2 = t.search(/\bR\$\s*[\d.,]+/i);
+      if (cut2 > 0) return t.slice(0, cut2).trim();
+      return t.slice(0, 120);
+    }
+
+    function soldFromCardBlock(/** @type {string} */ block) {
+      const b = block.replace(/\s+/g, ' ');
+      const re =
+        /([\d.,]+[KkMmBb]?)\s*\+?\s*(?:vendidos?(?:\([^)]*\))?|vendidas?|sales?|sold)\b/i;
+      const m1 = b.match(re);
+      if (m1 && m1.index != null) {
+        let sold_text = b.slice(m1.index, m1.index + m1[0].length).trim();
+        sold_text = clipSoldTextToVendorPhrase(sold_text);
+        const sold_count =
+          parseSoldCountFromDisplayText(m1[1]) ?? parseSoldCountFromDisplayText(sold_text);
+        return { sold_text, sold_count };
+      }
+      const re2 = /\b(?:vendidos?|vendidas?|sales?|sold)\s*[:·\-]?\s*([\d.,]+[KkMmBb]?)/i;
+      const m2 = b.match(re2);
+      if (m2) {
+        let sold_text = clipSoldTextToVendorPhrase(m2[0].trim());
+        const sold_count =
+          parseSoldCountFromDisplayText(m2[1]) ?? parseSoldCountFromDisplayText(sold_text);
+        return { sold_text, sold_count };
+      }
+      return { sold_text: '', sold_count: null };
+    }
+
+    /**
+     * @param {Record<string, unknown>} s
+     */
+    function isShippingMeaningfulForMerge(s) {
+      if (!s || typeof s !== 'object') return false;
+      if (s.is_free === true) return true;
+      if (typeof s.price === 'number' && s.price > 0) return true;
+      const t = String(s.text ?? '');
+      if (t && t !== 'unknown') return true;
+      return false;
+    }
+
+    /**
+     * Vitrine (DOM) prevalece; SSR completa furos.
+     * @param {Record<string, unknown>} dom
+     * @param {Record<string, unknown> | undefined} ssr
+     */
+    function mergeDomWithSsr(/** @type {Record<string, unknown>} */ dom, ssr) {
+      if (!ssr) return { ...dom };
+      const s = /** @type {Record<string, unknown>} */ (ssr);
+      const o = { ...s };
+      o.product_id = dom.product_id;
+      o.dashboard_rank = dom.dashboard_rank;
+      o.product_url = String((dom.product_url && String(dom.product_url).trim()) || s.product_url);
+      o.name = String((dom.name && String(dom.name).trim()) || s.name);
+      if (typeof dom.price_current === 'number' && isFinite(dom.price_current) && dom.price_current > 0) {
+        o.price_current = dom.price_current;
+      }
+      o.price_original =
+        dom.price_original != null && typeof dom.price_original === 'number' && dom.price_original > 0
+          ? dom.price_original
+          : s.price_original;
+      o.discount_percent =
+        dom.discount_percent != null && typeof dom.discount_percent === 'number'
+          ? dom.discount_percent
+          : s.discount_percent;
+      const ds = /** @type {Record<string, unknown> | null} */ (
+        dom.shipping && typeof dom.shipping === 'object' ? dom.shipping : null
+      );
+      if (ds && isShippingMeaningfulForMerge(ds)) {
+        o.shipping = dom.shipping;
+      } else {
+        o.shipping = s.shipping;
+      }
+      o.sold_text = String(
+        (dom.sold_text && String(dom.sold_text).trim().length) ? dom.sold_text : s.sold_text
+      );
+      o.sold_count = dom.sold_count != null ? dom.sold_count : s.sold_count;
+      o.image_main = String((dom.image_main && String(dom.image_main)) || s.image_main);
+      o.shop_name = String((dom.shop_name && String(dom.shop_name).trim()) || s.shop_name);
+      o.rating = dom.rating != null && typeof dom.rating === 'number' ? dom.rating : s.rating;
+      o.rating_count = dom.rating_count != null ? dom.rating_count : s.rating_count;
+      o.rating_distribution =
+        dom.rating_distribution != null ? dom.rating_distribution : s.rating_distribution;
+      return o;
+    }
+
+    /**
      * Heurística no cartão (DOM) quando o SSR não veio.
      * @param {Element} anchor
      */
@@ -1122,13 +1451,110 @@ export async function extractDashboardProductsFromSsr(page) {
         const m = block.match(re);
         if (m && m.index !== undefined) {
           const from = Math.max(0, m.index);
-          return block.slice(from, from + m[0].length + 12).trim().slice(0, 120);
+          return clipSoldTextToVendorPhrase(block.slice(from, from + m[0].length).trim());
         }
         const m2 = block.match(/(sold|vendidos?|vendidas?)\s*[:·\-]?\s*[\d.,]+[KkMmBb]?/i);
-        if (m2) return m2[0].trim().slice(0, 120);
+        if (m2) return clipSoldTextToVendorPhrase(m2[0].trim());
         el = el.parentElement;
       }
       return '';
+    }
+
+    /**
+     * Vitrine: um registo por cartão, dados visuais.
+     * @returns {Array<Record<string, unknown>>}
+     */
+    function extractFromDomVitrine() {
+      const root = document.querySelector('main') || document.body;
+      const seen = new Set();
+      /** @type {Array<Record<string, unknown>>} */
+      const rows = [];
+      const anchors = root.querySelectorAll('a[href*="/view/product/"], a[href*="/pdp/"]');
+      for (const a of anchors) {
+        const elA = /** @type {HTMLAnchorElement} */ (a);
+        const rawHref = elA.getAttribute('href') || '';
+        let href = '';
+        try {
+          href = new URL(rawHref, location.href).href.split(/[?#]/)[0];
+        } catch {
+          continue;
+        }
+        let m = href.match(/\/view\/product\/(?:[^/]+\/)?(\d{8,})\/?$/i);
+        if (!m) m = href.match(/\/pdp\/(?:[^/]+\/)?(\d{8,})\/?$/i);
+        if (!m) continue;
+        const id = m[1];
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const productUrl = regionalPdpUrl(id);
+        const card = getCardContainer(elA);
+        const fin = parseCardVisualFinancials(card);
+        const cardText = (card.innerText || card.textContent || '').replace(/\s+/g, ' ');
+        const soldBlock = soldFromCardBlock(cardText);
+        const soldText =
+          soldBlock.sold_text || soldTextFromDomNearProduct(elA);
+        const soldCount =
+          soldBlock.sold_count != null
+            ? soldBlock.sold_count
+            : soldText
+              ? parseSoldCountFromDisplayText(soldText)
+              : null;
+        const shipDom = shippingTextFromDomNearProduct(elA);
+        const ratDom = ratingFromDomNearProduct(elA);
+        let name = (
+          elA.getAttribute('aria-label') ||
+          elA.innerText ||
+          elA.textContent ||
+          ''
+        )
+          .replace(/\s+/g, ' ')
+          .trim()
+          .split('\n')[0]
+          .slice(0, 400);
+        if (name.length < 8) {
+          const t = (cardText.split(/\bR\$\s*[\d.,]+/i)[0] || '').trim().slice(0, 400);
+          if (t.length > name.length) name = t;
+        }
+        let img = '';
+        let shopNameDom = '';
+        let el = elA;
+        for (let up = 0; up < 8 && el; up++) {
+          el = el.parentElement;
+          if (!el) break;
+          const im = el.querySelector(
+            'img[src*="tiktokcdn"], img[src*="ibyteimg"], img[src*="ttwstatic"], img[src*="tiktok"]'
+          );
+          if (im && /** @type {HTMLImageElement} */ (im).src) {
+            img = /** @type {HTMLImageElement} */ (im).src.split('?')[0];
+          }
+          if (!shopNameDom) {
+            const storeA = el.querySelector('a[href*="/store/"]');
+            if (storeA) {
+              shopNameDom = (storeA.textContent || storeA.getAttribute('aria-label') || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 300);
+            }
+          }
+        }
+        rows.push({
+          dashboard_rank: rows.length + 1,
+          product_id: id,
+          product_url: productUrl,
+          name,
+          price_current: fin.price_current,
+          price_original: fin.price_original,
+          discount_percent: fin.discount_percent,
+          shipping: shipDom || defaultShippingUnknown(),
+          rating: ratDom.rating,
+          rating_count: ratDom.rating_count,
+          rating_distribution: ratDom.rating_distribution,
+          shop_name: shopNameDom,
+          image_main: img,
+          sold_text: soldText,
+          sold_count: soldCount,
+        });
+      }
+      return rows;
     }
 
     /** @param {unknown} o */
@@ -1200,86 +1626,6 @@ export async function extractDashboardProductsFromSsr(page) {
       return acc;
     }
 
-    /**
-     * @returns {Array<Record<string, unknown>>}
-     */
-    function extractFromDomDashboard() {
-      const root = document.querySelector('main') || document.body;
-      const seen = new Set();
-      /** @type {Array<Record<string, unknown>>} */
-      const rows = [];
-      const anchors = root.querySelectorAll('a[href*="/view/product/"], a[href*="/pdp/"]');
-      for (const a of anchors) {
-        let href = '';
-        try {
-          href = new URL(/** @type {HTMLAnchorElement} */ (a).href, location.href).href.split(/[?#]/)[0];
-        } catch {
-          continue;
-        }
-        let m = href.match(/\/view\/product\/(?:[^/]+\/)?(\d{8,})\/?$/i);
-        if (!m) m = href.match(/\/pdp\/(?:[^/]+\/)?(\d{8,})\/?$/i);
-        if (!m) continue;
-        const id = m[1];
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const productUrl = regionalPdpUrl(id);
-        const elA = /** @type {HTMLAnchorElement} */ (a);
-        let name = (
-          elA.getAttribute('aria-label') ||
-          elA.innerText ||
-          elA.textContent ||
-          ''
-        )
-          .replace(/\s+/g, ' ')
-          .trim()
-          .split('\n')[0]
-          .slice(0, 400);
-        let img = '';
-        let shopNameDom = '';
-        let el = elA;
-        for (let up = 0; up < 8 && el; up++) {
-          el = el.parentElement;
-          if (!el) break;
-          const im = el.querySelector(
-            'img[src*="tiktokcdn"], img[src*="ibyteimg"], img[src*="ttwstatic"], img[src*="tiktok"]'
-          );
-          if (im && /** @type {HTMLImageElement} */ (im).src) {
-            img = /** @type {HTMLImageElement} */ (im).src.split('?')[0];
-          }
-          if (!shopNameDom) {
-            const storeA = el.querySelector('a[href*="/store/"]');
-            if (storeA) {
-              shopNameDom = (storeA.textContent || storeA.getAttribute('aria-label') || '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .slice(0, 300);
-            }
-          }
-        }
-        const soldTextDom = soldTextFromDomNearProduct(elA);
-        const shipDom = shippingTextFromDomNearProduct(elA);
-        const ratDom = ratingFromDomNearProduct(elA);
-        rows.push({
-          dashboard_rank: rows.length + 1,
-          product_id: id,
-          product_url: productUrl || regionalPdpUrl(id),
-          name,
-          price_current: 0,
-          price_original: null,
-          discount_percent: null,
-          shipping: shipDom || defaultShippingUnknown(),
-          rating: ratDom.rating,
-          rating_count: ratDom.rating_count,
-          rating_distribution: ratDom.rating_distribution,
-          shop_name: shopNameDom,
-          image_main: img,
-          sold_text: soldTextDom,
-          sold_count: null,
-        });
-      }
-      return rows;
-    }
-
     function mapListToRows(list) {
       /** @type {Array<Record<string, unknown>>} */
       const out = [];
@@ -1305,7 +1651,8 @@ export async function extractDashboardProductsFromSsr(page) {
           product_url: pUrl,
           name,
           price_current: priceToNumber(
-            pinfo && typeof pinfo === 'object' ? pinfo : undefined
+            pinfo && typeof pinfo === 'object' ? pinfo : undefined,
+            p
           ),
           price_original: extras.price_original,
           discount_percent: extras.discount_percent,
@@ -1322,21 +1669,45 @@ export async function extractDashboardProductsFromSsr(page) {
       return out;
     }
 
-    const el = document.querySelector('script#__MODERN_ROUTER_DATA__');
-    if (el?.textContent?.trim()) {
+    /**
+     * Router SSR: merge por product_id; mesma lógica que `mapListToRows`.
+     * @returns {{ rows: Array<Record<string, unknown>>; byId: Map<string, Record<string, unknown>> }}
+     */
+    function buildSsrFromRouter() {
+      const out = {
+        /** @type {Array<Record<string, unknown>>} */
+        rows: [],
+        byId: /** @type {Map<string, Record<string, unknown>>} */ (new Map()),
+      };
+      const script = document.querySelector('script#__MODERN_ROUTER_DATA__');
+      if (!script?.textContent?.trim()) return out;
       try {
-        const router = JSON.parse(el.textContent);
+        const router = JSON.parse(script.textContent);
         let list = findLargestProductList(router);
         if (!Array.isArray(list) || list.length === 0) {
           list = collectAllProductsDedup(router);
         }
-        const fromJson = mapListToRows(list);
-        if (fromJson.length > 0) return fromJson;
+        if (!Array.isArray(list) || list.length === 0) return out;
+        out.rows = mapListToRows(list);
+        for (const r of out.rows) {
+          out.byId.set(String(r.product_id), r);
+        }
+        return out;
       } catch {
-        /* DOM fallback */
+        return out;
       }
     }
 
-    return extractFromDomDashboard();
+    const ssr = buildSsrFromRouter();
+    const domRows = extractFromDomVitrine();
+    if (domRows.length > 0) {
+      return domRows.map((d) =>
+        mergeDomWithSsr(/** @type {Record<string, unknown>} */ (d), ssr.byId.get(String(d.product_id)))
+      );
+    }
+    if (ssr.rows.length > 0) {
+      return ssr.rows;
+    }
+    return [];
   });
 }
