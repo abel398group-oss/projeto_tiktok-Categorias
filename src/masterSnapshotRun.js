@@ -12,6 +12,7 @@ import { launchBrowser } from './browser.js';
 import { writeFileAtomic, sleep } from './util.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { extractDashboardProductsFromSsr } from './masterSnapshotSsr.js';
+import { normalizeShippingEntry } from './shippingExtract.js';
 
 /**
  * @param {unknown} raw
@@ -157,8 +158,31 @@ async function main() {
             typeof r.price_current === 'number' && isFinite(r.price_current)
               ? r.price_current
               : 0,
+          price_original:
+            typeof r.price_original === 'number' && isFinite(r.price_original)
+              ? r.price_original
+              : null,
+          discount_percent:
+            typeof r.discount_percent === 'number' && isFinite(r.discount_percent)
+              ? r.discount_percent
+              : null,
           shop_name: String(r.shop_name ?? '').trim(),
           image_main: r.image_main ?? '',
+          sold_text: String(r.sold_text ?? '').trim(),
+          sold_count:
+            typeof r.sold_count === 'number' && isFinite(r.sold_count) ? r.sold_count : null,
+          shipping: normalizeShippingEntry(
+            r.shipping && typeof r.shipping === 'object' ? r.shipping : null
+          ),
+          rating: typeof r.rating === 'number' && isFinite(r.rating) ? r.rating : null,
+          rating_count:
+            typeof r.rating_count === 'number' && isFinite(r.rating_count)
+              ? Math.floor(r.rating_count)
+              : null,
+          rating_distribution:
+            r.rating_distribution != null && typeof r.rating_distribution === 'object'
+              ? r.rating_distribution
+              : null,
         });
       }
 

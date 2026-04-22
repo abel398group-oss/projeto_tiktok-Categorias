@@ -141,15 +141,23 @@ export async function extractDashboardProductsFromSsr(page) {
       return regionalPdpUrl(id) || `https://shop.tiktok.com/${pathRegion()}/pdp/${id}`;
     }
 
+    /**
+     * @param {unknown} v
+     * @returns {number | null}
+     */
+    function parseMoneyToNumber(v) {
+      if (v == null || v === '') return null;
+      if (typeof v === 'number' && isFinite(v)) return v >= 0 ? v : null;
+      const s = String(v).replace(/[^\d.,]/g, '').replace(',', '.');
+      const x = parseFloat(s);
+      return isFinite(x) && x >= 0 ? x : null;
+    }
+
     /** @param {unknown} ppi */
     function priceToNumber(ppi) {
       if (!ppi || typeof ppi !== 'object') return 0;
       function num(v) {
-        if (v == null || v === '') return null;
-        if (typeof v === 'number' && isFinite(v)) return v >= 0 ? v : null;
-        const s = String(v).replace(/[^\d.,]/g, '').replace(',', '.');
-        const x = parseFloat(s);
-        return isFinite(x) && x >= 0 ? x : null;
+        return parseMoneyToNumber(v);
       }
       const p = /** @type {Record<string, unknown>} */ (ppi);
       let n;
@@ -173,6 +181,108 @@ export async function extractDashboardProductsFromSsr(page) {
       if (n != null) return n;
       n = num(p.sale_price_format) ?? num(p.price_text);
       return n != null ? n : 0;
+    }
+
+    /**
+     * Preço “de”/tachado e desconto % a partir de product_price_info (vitrine / SSR).
+     * @param {Record<string, unknown>} p
+     * @returns {{ price_original: number | null; discount_percent: number | null }}
+     */
+    function priceExtrasFromProduct(p) {
+      /** @type {number | null} */
+      let price_original = null;
+      /** @type {number | null} */
+      let discount_percent = null;
+
+      const ppi = p.product_price_info ?? p.productPriceInfo;
+      if (!ppi || typeof ppi !== 'object') {
+        return { price_original, discount_percent };
+      }
+      const P = /** @type {Record<string, unknown>} */ (ppi);
+
+      function readOriginFromMin(/** @type {Record<string, unknown>} */ m) {
+        const op =
+          m.origin_price_decimal ??
+          m.originPriceDecimal ??
+          m.original_price_decimal ??
+          m.origin_price ??
+          m.original_price;
+        if (op == null) return;
+        const n = parseMoneyToNumber(op);
+        if (n != null && n > 0) price_original = n;
+      }
+
+      const min0 = P.min_price ?? P.minPrice;
+      if (min0 && typeof min0 === 'object') {
+        readOriginFromMin(/** @type {Record<string, unknown>} */ (min0));
+        const m = /** @type {Record<string, unknown>} */ (min0);
+        const ddec = m.discount_decimal ?? m.discountDecimal;
+        if (ddec != null && discount_percent == null) {
+          const n = parseMoneyToNumber(ddec);
+          if (n != null && n > 0) {
+            discount_percent = n > 0 && n <= 1 ? Math.round(n * 100) : Math.min(100, Math.round(n));
+          }
+        }
+        const df = m.discount_format ?? m.discountFormat;
+        if (df != null && discount_percent == null) {
+          const s = String(df);
+          const pctMatch = s.match(/-?\s*(\d{1,3})\s*%/);
+          if (pctMatch) discount_percent = parseInt(pctMatch[1], 10);
+        }
+      }
+
+      if (price_original == null) {
+        const od =
+          P.origin_price_decimal ??
+          P.original_price_decimal ??
+          P.origin_price ??
+          P.original_price;
+        if (od != null) {
+          const n = parseMoneyToNumber(od);
+          if (n != null && n > 0) price_original = n;
+        }
+      }
+
+      const prom = P.promotion_model ?? P.promotionModel;
+      if (prom && typeof prom === 'object' && price_original == null) {
+        const pmR = /** @type {Record<string, unknown>} */ (prom);
+        const ppp = pmR.promotion_product_price ?? pmR.promotionProductPrice;
+        if (ppp && typeof ppp === 'object') {
+          const pppR = /** @type {Record<string, unknown>} */ (ppp);
+          const min1 = pppR.min_price ?? pppR.minPrice;
+          if (min1 && typeof min1 === 'object') {
+            readOriginFromMin(/** @type {Record<string, unknown>} */ (min1));
+          }
+        }
+      }
+
+      for (const key of [
+        'discount',
+        'discount_percent',
+        'discount_percentage',
+        'discountPercent',
+        'price_discount',
+      ]) {
+        if (discount_percent != null) break;
+        const dRaw = P[key];
+        if (dRaw == null) continue;
+        const d = typeof dRaw === 'number' ? dRaw : parseFloat(String(dRaw).replace(/[^\d.-]/g, ''));
+        if (Number.isFinite(d)) {
+          if (d > 0 && d <= 1) discount_percent = Math.round(d * 100);
+          else if (d > 1 && d <= 100) discount_percent = Math.round(d);
+        }
+      }
+
+      const current = priceToNumber(ppi);
+      if (price_original != null && current > 0 && price_original > current) {
+        if (discount_percent == null) {
+          discount_percent = Math.max(0, Math.min(100, Math.round(100 * (1 - current / price_original))));
+        }
+      } else if (current > 0 && price_original == null) {
+        /* preço promocional sem “de” no payload — fica null */
+      }
+
+      return { price_original, discount_percent };
     }
 
     /** @param {Record<string, unknown>} p */
@@ -296,6 +406,728 @@ export async function extractDashboardProductsFromSsr(page) {
         if (t) return t;
       }
 
+      return '';
+    }
+
+    /**
+     * "45,3K", "3.1k vendido(s)", "15270" → inteiro. Alinha ao que a UI mostra com sufixo K/M.
+     * @param {unknown} v
+     * @returns {number | null}
+     */
+    function parseSoldCountFromDisplayText(v) {
+      if (v == null) return null;
+      const s0 = String(v)
+        .trim()
+        .replace(/[\u00a0\u202f]/g, ' ');
+      if (!s0) return null;
+
+      const kmb = s0.match(/([\d.,]+)\s*([kKmM])/i);
+      if (kmb) {
+        const part = kmb[1].trim();
+        const suf = kmb[2].toLowerCase();
+        let p = part;
+        if (/^\d+,\d{1,3}$/.test(p) && !/\./.test(p)) p = p.replace(',', '.');
+        else if (/^\d{1,3}(?:\.\d{3})+$/.test(p)) p = p.replace(/\./g, '');
+        const n0 = parseFloat(p);
+        if (!Number.isFinite(n0) || n0 < 0) return null;
+        const mult = suf === 'k' ? 1000 : suf === 'm' ? 1_000_000 : 1_000_000_000;
+        return Math.floor(n0 * mult);
+      }
+
+      if (/\b(mil|thousand)\b/i.test(s0)) {
+        const m2 = s0.match(/([\d.,]+)\s*(?:mil|thousand)/i);
+        if (m2) {
+          let p2 = m2[1].trim();
+          if (/^\d+,\d{1,2}$/.test(p2) && !/\./.test(p2)) p2 = p2.replace(',', '.');
+          const n2 = parseFloat(p2);
+          if (Number.isFinite(n2) && n2 >= 0) return Math.floor(n2 * 1000);
+        }
+      }
+
+      const digits = s0.replace(/[^\d]/g, '');
+      if (digits.length >= 1) {
+        const n = parseInt(digits, 10);
+        if (Number.isFinite(n) && n >= 0) return n;
+      }
+      return null;
+    }
+
+    /**
+     * Junta `format_sold_count` (texto com K/M) e `sold_count` (inteiro do API, por vezes outra métrica).
+     * @param {number | null} nFromFmt
+     * @param {number | null} nRaw
+     * @param {string | null} fmtStr
+     * @returns {number | null}
+     */
+    function mergeSoldNumber(nFromFmt, nRaw, fmtStr) {
+      if (nFromFmt != null && nRaw != null) {
+        const hasScale = fmtStr && /[kKmM]/.test(String(fmtStr));
+        if (hasScale) return nFromFmt;
+        if (nFromFmt >= nRaw) return nFromFmt;
+        return nRaw;
+      }
+      if (nFromFmt != null) return nFromFmt;
+      return nRaw;
+    }
+
+    /**
+     * Quantidade vendida (quando o feed expõe). Muitos produtos novos não trazem `sold_info`.
+     * @param {Record<string, unknown>} p
+     * @returns {{ sold_text: string; sold_count: number | null }}
+     */
+    function soldInfoFrom(p) {
+      /** @type {number | null} */
+      let sold_count = null;
+      let sold_text = '';
+
+      function applySoldBlock(/** @type {Record<string, unknown>} */ s) {
+        const fmt =
+          s.format_sold_count ?? s.formatSoldCount ?? s.sold_count_text ?? s.soldCountText;
+        const raw =
+          s.sold_count ??
+          s.soldCount ??
+          s.global_sold_count ??
+          s.globalSoldCount ??
+          s.total_sold_count ??
+          s.totalSoldCount;
+
+        if (fmt != null && String(fmt).trim()) {
+          sold_text = String(fmt).trim();
+        }
+
+        const nFromFmt = fmt != null && String(fmt).trim() ? parseSoldCountFromDisplayText(fmt) : null;
+        /** @type {number | null} */
+        let nRaw = null;
+        if (raw != null && String(raw).trim() !== '') {
+          const n = typeof raw === 'number' ? raw : Number(String(raw).replace(/[^\d.-]/g, ''));
+          if (Number.isFinite(n) && n >= 0) nRaw = Math.floor(n);
+        }
+        const merged = mergeSoldNumber(nFromFmt, nRaw, fmt != null ? String(fmt) : null);
+        if (merged != null) {
+          sold_count = merged;
+          if (!sold_text) sold_text = String(merged);
+        } else if (nRaw != null) {
+          sold_count = nRaw;
+          if (!sold_text) sold_text = String(nRaw);
+        } else if (nFromFmt != null) {
+          sold_count = nFromFmt;
+          if (!sold_text) sold_text = String(nFromFmt);
+        }
+      }
+
+      const sold = p.sold_info || p.soldInfo;
+      if (sold && typeof sold === 'object') {
+        applySoldBlock(/** @type {Record<string, unknown>} */ (sold));
+      }
+
+      if (sold_count == null && !sold_text) {
+        const mkt = p.product_marketing_info || p.productMarketingInfo;
+        if (mkt && typeof mkt === 'object') {
+          const m = /** @type {Record<string, unknown>} */ (mkt);
+          const t =
+            m.format_sold_count ??
+            m.formatSoldCount ??
+            m.sold_count_text ??
+            m.sold_text;
+          if (t != null && String(t).trim()) sold_text = String(t).trim();
+          const nFromFmt = t != null && String(t).trim() ? parseSoldCountFromDisplayText(t) : null;
+          const sc =
+            m.sold_count ??
+            m.soldCount ??
+            m.global_sold_count ??
+            m.globalSoldCount;
+          /** @type {number | null} */
+          let nRaw = null;
+          if (sc != null && String(sc).trim() !== '') {
+            const n = typeof sc === 'number' ? sc : Number(String(sc).replace(/[^\d.-]/g, ''));
+            if (Number.isFinite(n) && n >= 0) nRaw = Math.floor(n);
+          }
+          const merged = mergeSoldNumber(nFromFmt, nRaw, t != null ? String(t) : null);
+          if (merged != null) sold_count = merged;
+        }
+      }
+
+      if (sold_count == null && !sold_text) {
+        const pinfo = p.product_info || p.productInfo;
+        if (pinfo && typeof pinfo === 'object') {
+          const si = (/** @type {Record<string, unknown>} */ (pinfo)).sold_info
+            || (/** @type {Record<string, unknown>} */ (pinfo)).soldInfo;
+          if (si && typeof si === 'object') {
+            applySoldBlock(/** @type {Record<string, unknown>} */ (si));
+          }
+        }
+      }
+
+      /**
+       * O bloco de marketing costuma trazer o texto com K/M; `sold_info` às vezes traz outro inteiro.
+       * Se existir "45,3K" em qualquer sítio, preferir a contagem derivada desse texto.
+       */
+      function bestFmtFrom(/** @type {Record<string, unknown> | null | undefined} */ o) {
+        if (!o || typeof o !== 'object') return '';
+        return String(
+          o.format_sold_count ??
+            o.formatSoldCount ??
+            o.sold_count_text ??
+            o.soldCountText ??
+            o.sold_text ??
+            ''
+        ).trim();
+      }
+      const fmtCandidates = [
+        bestFmtFrom(/** @type {Record<string, unknown> | null} */ (p.sold_info || p.soldInfo)),
+        bestFmtFrom(
+          p.product_marketing_info && typeof p.product_marketing_info === 'object'
+            ? /** @type {Record<string, unknown>} */ (p.product_marketing_info)
+            : null
+        ),
+        bestFmtFrom(
+          p.productMarketingInfo && typeof p.productMarketingInfo === 'object'
+            ? /** @type {Record<string, unknown>} */ (p.productMarketingInfo)
+            : null
+        ),
+      ].filter(Boolean);
+      let bestK = 0;
+      let bestStr = '';
+      for (const fs of fmtCandidates) {
+        if (!/[kKmM]/.test(fs)) continue;
+        const n = parseSoldCountFromDisplayText(fs);
+        if (n != null && n > bestK) {
+          bestK = n;
+          bestStr = fs;
+        }
+      }
+      if (bestK > 0) {
+        if (sold_count == null || bestK > sold_count) {
+          sold_count = bestK;
+          if (bestStr) sold_text = bestStr;
+        }
+      }
+
+      return { sold_text, sold_count };
+    }
+
+    /**
+     * Nota média, quantidade de avaliações e, se existir, distribuição por estrelas (SSR / review_model).
+     * @param {Record<string, unknown>} p
+     * @returns {{ rating: number | null; rating_count: number | null; rating_distribution: unknown | null }}
+     */
+    function ratingInfoFrom(p) {
+      /** @type {number | null} */
+      let rating = null;
+      /** @type {number | null} */
+      let rating_count = null;
+      /** @type {unknown | null} */
+      let rating_distribution = null;
+
+      function numOrNull(/** @type {unknown} */ v) {
+        if (v == null || v === '') return null;
+        if (typeof v === 'number' && isFinite(v)) return v;
+        let t = String(v).trim();
+        if (/^\d+,\d+$/.test(t)) t = t.replace(',', '.');
+        const s = t.replace(/[^\d.-]/g, '');
+        if (!s) return null;
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : null;
+      }
+
+      function applyReviewModel(/** @type {Record<string, unknown>} */ rm) {
+        if (rating_count == null) {
+          const rc = rm.product_review_count ?? rm.productReviewCount;
+          const n = numOrNull(rc);
+          if (n != null) rating_count = Math.max(0, Math.floor(n));
+        }
+        if (rating == null) {
+          const os = rm.product_overall_score ?? rm.productOverallScore;
+          const n = numOrNull(os);
+          if (n != null) rating = n;
+        }
+        if (rating_distribution == null) {
+          const dist =
+            rm.rating_distribution ??
+            rm.ratingDistribution ??
+            rm.review_star_rating_distribution ??
+            rm.reviewStarRatingDistribution ??
+            rm.star_rating_distribution ??
+            rm.starRatingDistribution;
+          if (dist != null && typeof dist === 'object') {
+            const empty = Array.isArray(dist) ? dist.length === 0 : Object.keys(/** @type {object} */ (dist)).length === 0;
+            if (!empty) rating_distribution = dist;
+          }
+        }
+      }
+
+      const rate = p.rate_info || p.rateInfo;
+      if (rate && typeof rate === 'object') {
+        const r = /** @type {Record<string, unknown>} */ (rate);
+        if (rating == null) {
+          const sc = r.score ?? r.rating ?? r.star_rating ?? r.avg_rating ?? r.average_rating;
+          const n = numOrNull(sc);
+          if (n != null) rating = n;
+        }
+        if (rating_count == null) {
+          const rc = r.review_count ?? r.reviewCount;
+          const n = numOrNull(rc);
+          if (n != null) rating_count = Math.max(0, Math.floor(n));
+        }
+      }
+
+      if (rating == null) {
+        const pr =
+          p.product_rating ??
+          p.productRating ??
+          p.avg_rating ??
+          p.rating_score ??
+          p.rating;
+        const n = numOrNull(pr);
+        if (n != null) rating = n;
+      }
+
+      /**
+       * @param {Record<string, unknown>} pi
+       */
+      function mergePinfo(pi) {
+        const rm = pi.review_model ?? pi.reviewModel;
+        if (rm && typeof rm === 'object') {
+          applyReviewModel(/** @type {Record<string, unknown>} */ (rm));
+        }
+        const rinfo = pi.review_info ?? pi.reviewInfo;
+        if (rinfo && typeof rinfo === 'object' && rating_distribution == null) {
+          const ri = /** @type {Record<string, unknown>} */ (rinfo);
+          const rr = ri.review_ratings ?? ri.reviewRatings;
+          if (rr && typeof rr === 'object') {
+            const res = /** @type {Record<string, unknown>} */ (rr).rating_result
+              ?? /** @type {Record<string, unknown>} */ (rr).ratingResult;
+            if (res != null && typeof res === 'object') {
+              const empty = Array.isArray(res) ? res.length === 0 : Object.keys(/** @type {object} */ (res)).length === 0;
+              if (!empty) rating_distribution = res;
+            }
+          }
+        }
+      }
+
+      const pinfo = p.product_info || p.productInfo;
+      if (pinfo && typeof pinfo === 'object') {
+        mergePinfo(/** @type {Record<string, unknown>} */ (pinfo));
+      }
+
+      const rmRoot = p.review_model ?? p.reviewModel;
+      if (rmRoot && typeof rmRoot === 'object') {
+        applyReviewModel(/** @type {Record<string, unknown>} */ (rmRoot));
+      }
+
+      if (rating_count == null) {
+        const mkt = p.product_marketing_info || p.productMarketingInfo;
+        if (mkt && typeof mkt === 'object') {
+          const m = /** @type {Record<string, unknown>} */ (mkt);
+          const rc = m.review_count ?? m.reviewCount;
+          const n = numOrNull(rc);
+          if (n != null) rating_count = Math.max(0, Math.floor(n));
+        }
+      }
+
+      return { rating, rating_count, rating_distribution };
+    }
+
+    /**
+     * Cartão: “4,3 ★ (465)” / “5★(6)”.
+     * @param {Element} anchor
+     * @returns {{ rating: number | null; rating_count: number | null; rating_distribution: null }}
+     */
+    function ratingFromDomNearProduct(anchor) {
+      let el = /** @type {HTMLElement | null} */ (anchor);
+      for (let up = 0; up < 12 && el; up++) {
+        const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
+        const m = block.match(/(\d+[.,]?\d*)\s*★\s*\((\d[\d.,\s]*)\)/);
+        if (m) {
+          const r = parseFloat(m[1].replace(',', '.'));
+          const c = parseInt(String(m[2]).replace(/[^\d]/g, ''), 10);
+          if (Number.isFinite(r) && r >= 0 && r <= 5 && Number.isFinite(c) && c >= 0) {
+            return { rating: r, rating_count: c, rating_distribution: null };
+          }
+        }
+        el = el.parentElement;
+      }
+      return { rating: null, rating_count: null, rating_distribution: null };
+    }
+
+    function realPriceDescImpliesFree(rawText) {
+      const s = String(rawText ?? '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      return (
+        s.includes('gratis') ||
+        s.includes('free') ||
+        s.includes('sem frete') ||
+        s.includes('envio gratis')
+      );
+    }
+
+    function shippingLabelLooksFree(rawLabel) {
+      const s = String(rawLabel ?? '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      return (
+        s.includes('free') ||
+        s.includes('gratis') ||
+        s.includes('sem frete') ||
+        s.includes('envio gratis')
+      );
+    }
+
+    /**
+     * @param {Record<string, unknown> | null | undefined} pinfoObj
+     */
+    function collectLogisticListsFromPinfo(pinfoObj) {
+      if (!pinfoObj || typeof pinfoObj !== 'object') return [];
+      const pi = /** @type {Record<string, unknown>} */ (pinfoObj);
+      const keys = [
+        'promotion_logistic_list',
+        'promotionLogisticList',
+        'logistic_list',
+        'logisticList',
+        'logistics_service_list',
+        'logisticsServiceList',
+        'shipping_option_list',
+        'shippingOptionList',
+        'product_logistic_list',
+        'productLogisticList',
+      ];
+      for (const k of keys) {
+        const v = pi[k];
+        if (Array.isArray(v) && v.length) return v;
+      }
+      return [];
+    }
+
+    /**
+     * @param {Record<string, unknown>} pl
+     */
+    function resolveFeeBlock(pl) {
+      let fee = pl.shippingFee ?? pl.shipping_fee;
+      if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
+      const lm = pl.logistic_model ?? pl.logisticModel;
+      if (lm && typeof lm === 'object') {
+        const l = /** @type {Record<string, unknown>} */ (lm);
+        fee = l.shipping_fee ?? l.shippingFee ?? l.fee;
+        if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
+      }
+      const svc = pl.logistic_service ?? pl.logisticService ?? pl.shipping_service ?? pl.shippingService;
+      if (svc && typeof svc === 'object') {
+        const s = /** @type {Record<string, unknown>} */ (svc);
+        fee = s.shipping_fee ?? s.shippingFee ?? s.fee;
+        if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
+      }
+      return null;
+    }
+
+    /**
+     * @param {Record<string, unknown> | null} fee
+     */
+    function extractShipTextFromFee(fee) {
+      if (!fee || typeof fee !== 'object') return '';
+      const f = /** @type {Record<string, unknown>} */ (fee);
+      const rd =
+        f.real_price_desc ??
+        f.realPriceDesc ??
+        f.price_desc ??
+        f.priceDesc ??
+        f.fee_desc ??
+        f.display_text ??
+        f.displayText ??
+        '';
+      return String(rd).trim();
+    }
+
+    /**
+     * @param {Record<string, unknown>} pl
+     */
+    function extractEtaHintFromPl(pl) {
+      const lm = pl.logistic_model ?? pl.logisticModel;
+      /** @type {Record<string, unknown>[]} */
+      const nodes = [pl];
+      if (lm && typeof lm === 'object') nodes.push(/** @type {Record<string, unknown>} */ (lm));
+      for (const n of nodes) {
+        const h =
+          n.delivery_eta_text ??
+          n.deliveryEtaText ??
+          n.eta_text ??
+          n.etaText ??
+          n.delivery_time_desc ??
+          n.deliveryTimeDesc ??
+          n.shipping_text ??
+          n.shippingText ??
+          n.lead_time_text ??
+          n.leadTimeText ??
+          '';
+        const s = String(h).trim();
+        if (s) return s;
+      }
+      return '';
+    }
+
+    /**
+     * @param {Record<string, unknown>} pl
+     * @param {{ min: number | null; max: number | null }} dd
+     */
+    function buildShippingFromPlEntry(pl, dd) {
+      const freeRaw = pl.freeShipping ?? pl.free_shipping;
+      const fee = resolveFeeBlock(pl);
+      let shipPrice = 0;
+      let shipText = '';
+      if (fee && typeof fee === 'object') {
+        const ff = /** @type {Record<string, unknown>} */ (fee);
+        const rp = ff.real_price ?? ff.realPrice;
+        if (rp != null && String(rp).trim() !== '') {
+          let n = Number(rp);
+          if (!Number.isFinite(n)) n = parseMoneyToNumber(rp) ?? 0;
+          if (Number.isFinite(n) && n >= 0) shipPrice = n;
+        }
+        shipText = extractShipTextFromFee(fee);
+      }
+      if (!shipText) shipText = extractEtaHintFromPl(pl);
+      const origRaw = pl.originalShippingFee ?? pl.original_shipping_fee;
+      /** @type {number | null} */
+      let originalPrice = null;
+      if (origRaw != null && origRaw !== '') {
+        const n = Number(origRaw);
+        if (Number.isFinite(n)) originalPrice = n;
+      }
+      const delName = pl.deliveryName ?? pl.delivery_name;
+      const et = /** @type {Record<string, unknown> | undefined} */ (pl.event_tracking ?? pl.eventTracking);
+      let shipType = '';
+      if (et && typeof et === 'object') {
+        const st = et.shipping_type ?? et.shippingType;
+        if (st != null) shipType = String(st).trim();
+      }
+      let isFree = freeRaw === true || freeRaw === 1 || freeRaw === '1';
+      if (!isFree && shipPrice === 0 && shipText && realPriceDescImpliesFree(shipText)) isFree = true;
+
+      if (!shipText || shipText === 'unknown') {
+        if (freeRaw === true || freeRaw === 1 || freeRaw === '1' || isFree) {
+          shipText = 'Frete grátis';
+          isFree = true;
+        } else if (shipPrice > 0) {
+          shipText = `R$ ${shipPrice.toFixed(2).replace('.', ',')}`;
+        } else {
+          shipText = 'unknown';
+        }
+      }
+
+      return {
+        price: isFree ? 0 : shipPrice,
+        is_free: isFree,
+        text: shipText,
+        original_price: originalPrice,
+        delivery_name: delName != null ? String(delName).trim() : '',
+        shipping_type: shipType,
+        delivery_min_days: dd.min,
+        delivery_max_days: dd.max,
+      };
+    }
+
+    /**
+     * @param {Record<string, unknown> | null | undefined} pinfoObj
+     */
+    function extractPinfoShippingHint(pinfoObj) {
+      if (!pinfoObj || typeof pinfoObj !== 'object') return '';
+      const pi = /** @type {Record<string, unknown>} */ (pinfoObj);
+      const keys = [
+        'shipping_summary',
+        'shippingSummary',
+        'delivery_text',
+        'deliveryText',
+        'logistic_text',
+        'logisticText',
+      ];
+      for (const k of keys) {
+        const v = pi[k];
+        if (v != null && String(v).trim()) return String(v).trim();
+      }
+      return '';
+    }
+
+    /**
+     * @returns {{ price: number; is_free: boolean; text: string; original_price: number | null; delivery_name: string; shipping_type: string; delivery_min_days: number | null; delivery_max_days: number | null }}
+     */
+    function defaultShippingUnknown() {
+      return {
+        price: 0,
+        is_free: false,
+        text: 'unknown',
+        original_price: null,
+        delivery_name: '',
+        shipping_type: '',
+        delivery_min_days: null,
+        delivery_max_days: null,
+      };
+    }
+
+    /**
+     * Frete: “Frete grátis” em labels; valor em listas logísticas; fallback texto em product_*.
+     * @param {Record<string, unknown>} p
+     */
+    function shippingFromProduct(p) {
+      const mkt = p.product_marketing_info || p.productMarketingInfo;
+      if (mkt && typeof mkt === 'object') {
+        const mk = /** @type {Record<string, unknown>} */ (mkt);
+        const labels = mk.shipping_labels || mk.shippingLabels;
+        if (Array.isArray(labels) && labels.some((l) => shippingLabelLooksFree(l))) {
+          return {
+            price: 0,
+            is_free: true,
+            text: 'Frete grátis',
+            original_price: null,
+            delivery_name: '',
+            shipping_type: '',
+            delivery_min_days: null,
+            delivery_max_days: null,
+          };
+        }
+        if (Array.isArray(labels) && labels.length) {
+          const t = labels.map((x) => String(x).trim()).filter(Boolean).join(' · ').slice(0, 200);
+          if (t) {
+            if (realPriceDescImpliesFree(t)) {
+              return {
+                price: 0,
+                is_free: true,
+                text: 'Frete grátis',
+                original_price: null,
+                delivery_name: '',
+                shipping_type: '',
+                delivery_min_days: null,
+                delivery_max_days: null,
+              };
+            }
+            const money = t.match(/R\$\s*[\d.,]+/i);
+            const pr = money ? parseMoneyToNumber(money[0]) : null;
+            if (pr != null && pr > 0) {
+              return {
+                price: pr,
+                is_free: false,
+                text: t,
+                original_price: null,
+                delivery_name: '',
+                shipping_type: '',
+                delivery_min_days: null,
+                delivery_max_days: null,
+              };
+            }
+          }
+        }
+      }
+
+      const emptyDd = { min: /** @type {number | null} */ (null), max: /** @type {number | null} */ (null) };
+      /** @type {Record<string, unknown>[]} */
+      const pinfoSources = [];
+      if (p.product_info && typeof p.product_info === 'object') {
+        pinfoSources.push(/** @type {Record<string, unknown>} */ (p.product_info));
+      }
+      if (p.productInfo && typeof p.productInfo === 'object') {
+        pinfoSources.push(/** @type {Record<string, unknown>} */ (p.productInfo));
+      }
+      const ppi = p.product_price_info ?? p.productPriceInfo;
+      if (ppi && typeof ppi === 'object') {
+        pinfoSources.push(/** @type {Record<string, unknown>} */ (ppi));
+      }
+      pinfoSources.push(p);
+
+      for (const pinfo of pinfoSources) {
+        const entries = collectLogisticListsFromPinfo(pinfo);
+        for (const e of entries) {
+          if (!e || typeof e !== 'object') continue;
+          const built = buildShippingFromPlEntry(/** @type {Record<string, unknown>} */ (e), emptyDd);
+          if (built.text && built.text !== 'unknown') return built;
+          if (!built.is_free && built.price > 0) return built;
+        }
+      }
+
+      for (const pinfo of pinfoSources) {
+        const hint = extractPinfoShippingHint(pinfo);
+        if (hint) {
+          const isFree = realPriceDescImpliesFree(hint);
+          const hm = hint.match(/R\$\s*[\d.,]+/i);
+          const prFromHint = hm ? parseMoneyToNumber(hm[0]) : null;
+          return {
+            price: isFree ? 0 : prFromHint != null && prFromHint > 0 ? prFromHint : 0,
+            is_free: isFree,
+            text: hint,
+            original_price: null,
+            delivery_name: '',
+            shipping_type: '',
+            delivery_min_days: null,
+            delivery_max_days: null,
+          };
+        }
+      }
+
+      return defaultShippingUnknown();
+    }
+
+    /**
+     * Tenta ler linha “Frete …” no cartão (listagem) quando o JSON não traz logística.
+     * @param {Element} anchor
+     */
+    function shippingTextFromDomNearProduct(anchor) {
+      let el = /** @type {HTMLElement | null} */ (anchor);
+      for (let up = 0; up < 12 && el; up++) {
+        const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
+        const m = block.match(/Frete[^\n]{0,120}/i);
+        if (m) {
+          const line = m[0].replace(/\s+/g, ' ').trim().slice(0, 200);
+          if (realPriceDescImpliesFree(line) || /gr[aá]tis/i.test(line)) {
+            return {
+              price: 0,
+              is_free: true,
+              text: 'Frete grátis',
+              original_price: null,
+              delivery_name: '',
+              shipping_type: '',
+              delivery_min_days: null,
+              delivery_max_days: null,
+            };
+          }
+          const pm = line.match(/R\$\s*[\d.,]+/i);
+          if (pm) {
+            const n = parseMoneyToNumber(pm[0]);
+            if (n != null && n > 0) {
+              return {
+                price: n,
+                is_free: false,
+                text: line,
+                original_price: null,
+                delivery_name: '',
+                shipping_type: '',
+                delivery_min_days: null,
+                delivery_max_days: null,
+              };
+            }
+          }
+        }
+        el = el.parentElement;
+      }
+      return null;
+    }
+
+    /**
+     * Heurística no cartão (DOM) quando o SSR não veio.
+     * @param {Element} anchor
+     */
+    function soldTextFromDomNearProduct(anchor) {
+      let el = /** @type {HTMLElement | null} */ (anchor);
+      for (let up = 0; up < 12 && el; up++) {
+        const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
+        const re = /[\d.,]+[KkMmBb]?\s*\+?\s*(sold|vendidos?|vendidas?|sales?)/i;
+        const m = block.match(re);
+        if (m && m.index !== undefined) {
+          const from = Math.max(0, m.index);
+          return block.slice(from, from + m[0].length + 12).trim().slice(0, 120);
+        }
+        const m2 = block.match(/(sold|vendidos?|vendidas?)\s*[:·\-]?\s*[\d.,]+[KkMmBb]?/i);
+        if (m2) return m2[0].trim().slice(0, 120);
+        el = el.parentElement;
+      }
       return '';
     }
 
@@ -424,14 +1256,25 @@ export async function extractDashboardProductsFromSsr(page) {
             }
           }
         }
+        const soldTextDom = soldTextFromDomNearProduct(elA);
+        const shipDom = shippingTextFromDomNearProduct(elA);
+        const ratDom = ratingFromDomNearProduct(elA);
         rows.push({
           dashboard_rank: rows.length + 1,
           product_id: id,
           product_url: productUrl || regionalPdpUrl(id),
           name,
           price_current: 0,
+          price_original: null,
+          discount_percent: null,
+          shipping: shipDom || defaultShippingUnknown(),
+          rating: ratDom.rating,
+          rating_count: ratDom.rating_count,
+          rating_distribution: ratDom.rating_distribution,
           shop_name: shopNameDom,
           image_main: img,
+          sold_text: soldTextDom,
+          sold_count: null,
         });
       }
       return rows;
@@ -453,6 +1296,9 @@ export async function extractDashboardProductsFromSsr(page) {
         if (!pUrl || pUrl.includes('[object Object]') || pUrl.includes('%5Bobject%20Object%5D')) {
           pUrl = regionalPdpUrl(id) || `https://shop.tiktok.com/${pathRegion()}/pdp/${id}`;
         }
+        const sold = soldInfoFrom(p);
+        const extras = priceExtrasFromProduct(p);
+        const rat = ratingInfoFrom(p);
         out.push({
           dashboard_rank: rank,
           product_id: id,
@@ -461,8 +1307,16 @@ export async function extractDashboardProductsFromSsr(page) {
           price_current: priceToNumber(
             pinfo && typeof pinfo === 'object' ? pinfo : undefined
           ),
+          price_original: extras.price_original,
+          discount_percent: extras.discount_percent,
+          shipping: shippingFromProduct(p),
+          rating: rat.rating,
+          rating_count: rat.rating_count,
+          rating_distribution: rat.rating_distribution,
           shop_name: shopNameFrom(p),
           image_main: firstImg(p),
+          sold_text: sold.sold_text,
+          sold_count: sold.sold_count,
         });
       }
       return out;
