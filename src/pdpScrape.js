@@ -20,6 +20,28 @@ function pdpRouterEvaluateLimits() {
   };
 }
 
+/**
+ * Dá tempo à PDP hidratar / lazy render antes do `page.evaluate` de vendas.
+ * Não altera a lógica de `pickMaxSoldFromVendidoTexts` — só esperas + scroll leve.
+ * @param {import('puppeteer').Page} page
+ */
+async function pdpPreSoldCollectionReady(page) {
+  await page
+    .waitForFunction(
+      () => {
+        const text = document.body?.innerText || '';
+        return /\d+(\.\d+)?[KkMm]?\s+vendido/i.test(text);
+      },
+      { timeout: 10_000 }
+    )
+    .catch(() => {});
+  await page.waitForSelector('h1', { timeout: 10_000 }).catch(() => {});
+  await sleep(1500);
+  await page.evaluate(() => {
+    window.scrollBy(0, 300);
+  });
+}
+
 /** @param {string} s */
 function splitTaxonomyParts(s) {
   const t = String(s ?? '').trim();
@@ -1470,6 +1492,8 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
 
   await sleep(randomBetween(1800, 3200));
   await page.waitForNetworkIdle({ idleTime: 400, timeout: 20_000 }).catch(() => {});
+
+  await pdpPreSoldCollectionReady(page);
 
   const coleta = new Date().toISOString();
   const taxonomiaDom = (await extractTaxonomyPath(page, taxonomiaFallback)) || taxonomiaFallback || '';
