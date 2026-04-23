@@ -197,26 +197,61 @@ function enrichLegacyRowFromRouter(best, routerRow) {
  * @param {Record<string, unknown> | null} routerRow
  */
 /**
+ * Log diagnóstico: tenta achar o primeiro nó cujo innerText (normalizado) iguala o texto vencedor.
+ * @param {import('puppeteer').Page} page
+ * @param {string} productUrl
+ * @param {string} winningText
+ */
+async function logPdpSoldSelectedElementHtml(page, productUrl, winningText) {
+  const t = String(winningText || '').replace(/\s+/g, ' ').trim();
+  const product_url = String(productUrl || '').trim() || '(unknown)';
+  if (!t || !page) {
+    console.log('[sold selected html]', { product_url, html: null });
+    return;
+  }
+  const html = await page.evaluate((target) => {
+    const norm = (s) => (s && String(s).replace(/\s+/g, ' ').trim()) || '';
+    const tgt = String(target).replace(/\s+/g, ' ').trim();
+    for (const el of document.querySelectorAll('*')) {
+      if (norm(/** @type {Element} */ (el).innerText) === tgt) {
+        return /** @type {Element} */ (el).outerHTML || null;
+      }
+    }
+    return null;
+  }, t);
+  console.log('[sold selected html]', { product_url, html: html && String(html).length > 0 ? String(html) : null });
+}
+
+/**
  * Vendas na PDP: texto(s) visível(is) no DOM = fonte oficial (não sobrescrever com router depois).
  * Vários nós podem ter "vendido(s)" — usa o maior valor parseado.
  * @param {Record<string, unknown> | null} row
  * @param {string | string[] | null | undefined} pdp_sold_dom_input um texto ou todos os candidatos do DOM
+ * @param {{ product_url?: string; raw_dom_texts?: string[] } | null | undefined} [log]
  */
-function applyPdpDomSold(row, pdp_sold_dom_input) {
-  if (!row || typeof row !== 'object') return;
+function applyPdpDomSold(row, pdp_sold_dom_input, log) {
+  if (!row || typeof row !== 'object') return null;
   const list = Array.isArray(pdp_sold_dom_input)
     ? pdp_sold_dom_input.map((s) => String(s).trim()).filter(Boolean)
     : pdp_sold_dom_input != null && String(pdp_sold_dom_input).trim()
       ? [String(pdp_sold_dom_input).trim()]
       : [];
-  if (!list.length) return;
+  if (!list.length) return null;
+  const product_url = String(
+    log?.product_url || row?.link_do_produto || row?.product_url || ''
+  )
+    .trim() || '(unknown)';
   const routerBefore = String(row.total_vendas ?? '').trim();
   const pick = pickMaxSoldFromVendidoTexts(list);
+  const raw = log && Array.isArray(log.raw_dom_texts) ? log.raw_dom_texts : [];
+  console.log('[sold candidates]', pick.candidates);
+  console.log('[sold selected]', pick.best);
   console.log('[sold candidates]', {
-    texts: pick.texts,
-    parsed: pick.parsed,
-    selected: pick.selected,
+    product_url,
+    candidates: pick.candidates.map((c) => ({ text: c.text, value: c.value })),
   });
+  console.log('[sold selected]', { product_url, selected: pick.best });
+  console.log('[sold raw texts]', { product_url, texts: raw });
   row.total_vendas = pick.winningText;
   if (pick.count != null && Number.isFinite(pick.count)) {
     row.product_sold_count = pick.count;
@@ -231,6 +266,7 @@ function applyPdpDomSold(row, pdp_sold_dom_input) {
     parsed_value: row.product_sold_count,
     router_value: routerBefore,
   });
+  return pick;
 }
 
 /**
@@ -287,7 +323,7 @@ async function mergeDomShippingIntoRouterRow(page, routerRow) {
  * PDP: __MODERN_ROUTER_DATA__ → components_map (product_info) → preços (opcional), loja, review_model, variantes.
  * `preco_atual` pode ficar vazio; loja/reviews/variantes vêm quando `product_info` existe.
  * @param {{ maxReviews?: number; maxTextChars?: number; maxPhotosPerReview?: number; maxSkuOffers?: number }} sampleLimits
- * @returns {Promise<{ row: Record<string, unknown> | null; diag: Record<string, unknown>; pdp_sold_dom_candidates: string[] }>}
+ * @returns {Promise<{ row: Record<string, unknown> | null; diag: Record<string, unknown>; pdp_sold_dom_candidates: string[]; pdp_sold_raw_texts: string[] }>}
  */
 function extractPdpPricesFromRouter(page, sampleLimits) {
   return page.evaluate((limitsArg) => {
@@ -323,28 +359,34 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
     };
 
     /**
-     * Todos os textos visíveis com "vendido" na PDP (dedupe por string exata).
+     * Todos os nós: innerText com "vendido" (cobertura máxima; dedupe por string).
+     * `raw` = lista bruta pré-dedupe; `candidates` = strings únicas para o parser.
      */
-    function collectPdpSoldDomCandidates() {
+    function collectPdpSoldDomData() {
+      const MAX_LEN = 32_000;
+      const allTexts = Array.from(document.querySelectorAll('*'))
+        .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
+        .filter(Boolean)
+        .filter((text) => text.length <= MAX_LEN)
+        .filter((text) => text.toLowerCase().includes('vendido'));
       const seen = new Set();
       /** @type {string[]} */
       const cands = [];
-      document
-        .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"], [class*="H4-"]')
-        .forEach((n) => {
-          const raw = (n.innerText || n.textContent || '').replace(/\s+/g, ' ').trim();
-          if (!raw || raw.length > 120) return;
-          if (!/\bvendido/i.test(raw)) return;
-          if (seen.has(raw)) return;
-          seen.add(raw);
-          cands.push(raw);
-        });
-      return cands;
+      for (const t of allTexts) {
+        if (seen.has(t)) continue;
+        seen.add(t);
+        cands.push(t);
+      }
+      return { candidates: cands, raw: allTexts };
+    }
+    function pdpSoldDomFields() {
+      const d = collectPdpSoldDomData();
+      return { pdp_sold_dom_candidates: d.candidates, pdp_sold_raw_texts: d.raw };
     }
 
     const el = document.querySelector('script#__MODERN_ROUTER_DATA__');
     if (!el?.textContent?.trim()) {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
     diag.found_modern_script = true;
 
@@ -353,11 +395,11 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       router = JSON.parse(el.textContent);
       diag.parsed_json = true;
     } catch {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
     const ld = router.loaderData;
     if (!ld || typeof ld !== 'object') {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
     diag.found_loader_data = true;
 
@@ -370,7 +412,7 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       }
     }
     if (!pageConfig?.components_map) {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
     diag.found_components_map = true;
 
@@ -397,7 +439,7 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       }
     }
     if (!comp?.component_data) {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
 
     const cd = /** @type {Record<string, unknown>} */ (comp.component_data);
@@ -405,7 +447,7 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       cd.product_info ?? cd.productInfo
     );
     if (!pinfo || typeof pinfo !== 'object') {
-      return { row: null, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+      return { row: null, diag, ...pdpSoldDomFields() };
     }
     diag.found_product_info = true;
 
@@ -1368,7 +1410,7 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       product_properties: productPropertiesStructured,
       sku_offers: skuOffers,
     };
-    return { row, diag, pdp_sold_dom_candidates: collectPdpSoldDomCandidates() };
+    return { row, diag, ...pdpSoldDomFields() };
   }, sampleLimits);
 }
 
@@ -1436,16 +1478,28 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
   const best = pickBestRow(fromNet);
 
   if (best && best.sku) {
+    const pUrl = page.url().split('#')[0];
     console.info('[pdp] source=sniffer', {
       sku: best.sku,
-      url: page.url().split('#')[0],
+      url: pUrl,
     });
-    const { row: routerForEnrich, diag: routerDiag, pdp_sold_dom_candidates: domSoldSniffer } =
-      await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
+    const {
+      row: routerForEnrich,
+      diag: routerDiag,
+      pdp_sold_dom_candidates: domSoldSniffer,
+      pdp_sold_raw_texts: rawSniffer,
+    } = await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
     if (routerForEnrich) {
       const hasDom = Array.isArray(domSoldSniffer) && domSoldSniffer.length > 0;
-      if (hasDom) applyPdpDomSold(routerForEnrich, domSoldSniffer);
-      else applyPdpRouterSoldFallback(routerForEnrich);
+      if (hasDom) {
+        applyPdpDomSold(routerForEnrich, domSoldSniffer, {
+          product_url: pUrl,
+          raw_dom_texts: Array.isArray(rawSniffer) ? rawSniffer : [],
+        });
+        await logPdpSoldSelectedElementHtml(page, pUrl, String(routerForEnrich.total_vendas || ''));
+      } else {
+        applyPdpRouterSoldFallback(routerForEnrich);
+      }
     }
     await mergeDomShippingIntoRouterRow(page, routerForEnrich);
     logPdpRouterSnifferDiag(routerDiag, String(best.sku || ''));
@@ -1466,12 +1520,23 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
   const url = page.url().split('#')[0];
   const mHint = url.match(/(\d{10,})/g);
   const urlProductHint = mHint?.length ? mHint[mHint.length - 1] : '';
-  const { row: routerRow, diag: routerDiagPdp, pdp_sold_dom_candidates: domSoldPdp } =
-    await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
+  const {
+    row: routerRow,
+    diag: routerDiagPdp,
+    pdp_sold_dom_candidates: domSoldPdp,
+    pdp_sold_raw_texts: rawPdp,
+  } = await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
   if (routerRow) {
     const hasDom = Array.isArray(domSoldPdp) && domSoldPdp.length > 0;
-    if (hasDom) applyPdpDomSold(routerRow, domSoldPdp);
-    else applyPdpRouterSoldFallback(routerRow);
+    if (hasDom) {
+      applyPdpDomSold(routerRow, domSoldPdp, {
+        product_url: url,
+        raw_dom_texts: Array.isArray(rawPdp) ? rawPdp : [],
+      });
+      await logPdpSoldSelectedElementHtml(page, url, String(routerRow.total_vendas || ''));
+    } else {
+      applyPdpRouterSoldFallback(routerRow);
+    }
   }
   await mergeDomShippingIntoRouterRow(page, routerRow);
   logPdpRouterSnifferDiag(routerDiagPdp, urlProductHint);
@@ -1580,19 +1645,20 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
     const preco_atual = prices[0] || '';
     const preco_original = prices.length > 1 ? prices[1] : '';
 
+    const MAX_LEN = 32_000;
+    const allSold = Array.from(document.querySelectorAll('*'))
+      .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
+      .filter(Boolean)
+      .filter((text) => text.length <= MAX_LEN)
+      .filter((text) => text.toLowerCase().includes('vendido'));
     const soldSeen = new Set();
     /** @type {string[]} */
     const soldCands = [];
-    document
-      .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"], [class*="H4-"]')
-      .forEach((el) => {
-        const raw = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!raw || raw.length > 120) return;
-        if (!/\bvendido/i.test(raw)) return;
-        if (soldSeen.has(raw)) return;
-        soldSeen.add(raw);
-        soldCands.push(raw);
-      });
+    for (const t of allSold) {
+      if (soldSeen.has(t)) continue;
+      soldSeen.add(t);
+      soldCands.push(t);
+    }
 
     let rating = '';
     document.querySelectorAll('[class*="rating" i], [class*="review" i], [aria-label*="star" i]').forEach((el) => {
@@ -1611,6 +1677,7 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
       preco_atual,
       preco_original,
       soldCands,
+      allSold,
       rating,
       img,
     };
@@ -1622,12 +1689,16 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
 
   console.info('[pdp] source=dom', { sku, url });
 
+  const allSold = Array.isArray(dom.allSold) ? dom.allSold : [];
   const pickDom = pickMaxSoldFromVendidoTexts(Array.isArray(dom.soldCands) ? dom.soldCands : []);
+  console.log('[sold candidates]', pickDom.candidates);
+  console.log('[sold selected]', pickDom.best);
   console.log('[sold candidates]', {
-    texts: pickDom.texts,
-    parsed: pickDom.parsed,
-    selected: pickDom.selected,
+    product_url: url,
+    candidates: pickDom.candidates.map((c) => ({ text: c.text, value: c.value })),
   });
+  console.log('[sold selected]', { product_url: url, selected: pickDom.best });
+  console.log('[sold raw texts]', { product_url: url, texts: allSold });
   const stDom = String(pickDom.winningText || '').trim();
   const pscDomN = pickDom.count;
   console.log('[sold source]', {
@@ -1636,6 +1707,7 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
     parsed_value: pscDomN,
     router_value: null,
   });
+  await logPdpSoldSelectedElementHtml(page, url, stDom);
 
   return {
     sku,

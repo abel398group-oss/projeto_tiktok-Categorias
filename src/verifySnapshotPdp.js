@@ -70,19 +70,20 @@ async function extractPdpSnapshot(page) {
           .replace(/\s+/g, ' ')
           .trim()
       : '';
+    const MAX_LEN = 32_000;
+    const allVend = Array.from(document.querySelectorAll('*'))
+      .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
+      .filter(Boolean)
+      .filter((text) => text.length <= MAX_LEN)
+      .filter((text) => text.toLowerCase().includes('vendido'));
     const domSoldSeen = new Set();
     /** @type {string[]} */
     const domSoldTexts = [];
-    document
-      .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"]')
-      .forEach((el) => {
-        const raw = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!raw || raw.length > 120) return;
-        if (!/\bvendido/i.test(raw)) return;
-        if (domSoldSeen.has(raw)) return;
-        domSoldSeen.add(raw);
-        domSoldTexts.push(raw);
-      });
+    for (const t of allVend) {
+      if (domSoldSeen.has(t)) continue;
+      domSoldSeen.add(t);
+      domSoldTexts.push(t);
+    }
     return {
       text: text.slice(0, 12_000),
       title: title.replace(/\s+/g, ' ').trim().slice(0, 500),
@@ -187,11 +188,8 @@ async function main() {
         const pickSold = pickMaxSoldFromVendidoTexts(
           Array.isArray(snap.dom_sold_texts) ? snap.dom_sold_texts : []
         );
-        console.log('[sold candidates]', {
-          texts: pickSold.texts,
-          parsed: pickSold.parsed,
-          selected: pickSold.selected,
-        });
+        console.log('[sold candidates]', pickSold.candidates);
+        console.log('[sold selected]', pickSold.best);
         const domSold = String(pickSold.winningText || '');
         const soldSource = domSold && domSold.trim() ? domSold : fullText;
         const pdpSold =

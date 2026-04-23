@@ -36,11 +36,14 @@ export function parseSoldCountFromDisplayText(text) {
 }
 
 /**
- * A PDP pode ter vários nós com "vendido(s)" (ex.: variante 247 vs total 10.2K).
- * Deduplica textos, faz parse de cada um e devolve o maior valor.
+ * A PDP pode ter vários nós com "vendido(s)" (ex.: variante vs total do produto).
+ * Deduplica textos, faz parse de cada um e escolhe o maior valor.
+ * Se existir algum valor > 0, ignora entradas com 0 (evita “0 vendido(s)” quando há “10.2K vendido(s)”).
  *
  * @param {readonly (string | null | undefined)[]} rawCandidates
  * @returns {{
+ *   candidates: { text: string; value: number | null }[];
+ *   best: { text: string; value: number } | null;
  *   winningText: string;
  *   count: number | null;
  *   texts: string[];
@@ -60,35 +63,53 @@ export function pickMaxSoldFromVendidoTexts(rawCandidates) {
     list.push(t);
   }
   if (!list.length) {
-    return { winningText: '', count: null, texts: [], parsed: [], selected: null };
-  }
-  const parsed = list.map((text) => parseSoldCountFromDisplayText(text));
-  let bestN = -1;
-  let bestIdx = 0;
-  for (let i = 0; i < list.length; i += 1) {
-    const n = parsed[i];
-    if (n == null || !Number.isFinite(n)) continue;
-    const fn = Math.floor(n);
-    if (fn > bestN) {
-      bestN = fn;
-      bestIdx = i;
-    }
-  }
-  if (bestN < 0) {
     return {
-      winningText: list[0],
+      candidates: [],
+      best: null,
+      winningText: '',
       count: null,
-      texts: list,
-      parsed,
+      texts: [],
+      parsed: [],
       selected: null,
     };
   }
+  /** @type {{ text: string; value: number | null }[]} */
+  const candidates = list.map((text) => ({
+    text,
+    value: parseSoldCountFromDisplayText(text),
+  }));
+  let pool = candidates.filter((c) => {
+    if (c.value == null) return false;
+    const n = Number(c.value);
+    return Number.isFinite(n) && !Number.isNaN(n);
+  });
+  /** @type {{ text: string; value: number }[]} */
+  pool = pool.map((c) => ({ text: c.text, value: /** @type {number} */ (c.value) }));
+  if (pool.some((c) => c.value > 0)) {
+    pool = pool.filter((c) => c.value > 0);
+  }
+  /** @type {{ text: string; value: number } | null} */
+  let best = null;
+  if (pool.length) {
+    const sorted = [...pool].sort((a, b) => b.value - a.value);
+    const w = sorted[0];
+    if (w) {
+      best = { text: w.text, value: Math.max(0, Math.floor(w.value)) };
+    }
+  }
+
+  const winningText = best ? best.text : list[0];
+  const count = best ? best.value : null;
+  const parsed = candidates.map((c) => c.value);
+
   return {
-    winningText: list[bestIdx],
-    count: Math.max(0, bestN),
+    candidates,
+    best,
+    winningText,
+    count,
     texts: list,
     parsed,
-    selected: Math.max(0, bestN),
+    selected: count,
   };
 }
 
