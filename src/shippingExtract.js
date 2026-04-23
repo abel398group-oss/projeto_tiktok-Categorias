@@ -2,7 +2,7 @@
 
 export function emptyShipping() {
   return {
-    price: 0,
+    price: null,
     is_free: false,
     text: 'unknown',
     original_price: null,
@@ -93,10 +93,10 @@ export function normalizeShippingEntry(s) {
   const rawPrice = o.price;
   /** @type {number | null} */
   let price;
-  if (rawPrice === null) price = null;
+  if (rawPrice === null || rawPrice === undefined) price = null;
   else {
     const n = Number(rawPrice);
-    price = Number.isFinite(n) ? n : 0;
+    price = Number.isFinite(n) ? n : null;
   }
   const out = {
     price,
@@ -132,98 +132,248 @@ export function normalizeShippingEntry(s) {
 }
 
 /**
- * Heurística na PDP quando o JSON não traz `real_price_desc`: texto visível na página.
- * @param {import('puppeteer').Page} page
- * @returns {Promise<Record<string, unknown> | null>}
+ * @param {string} token
+ * @returns {number | null}
  */
-export async function extractPdpShippingDom(page) {
-  const raw = await page
+function parseBrlMoneyToken(token) {
+  const g = String(token).trim();
+  if (/^\d{1,3}(?:\.\d{3})+,\d{2}$/.test(g)) {
+    return parseFloat(g.replace(/\./g, '').replace(',', '.'));
+  }
+  if (/^\d+,\d{1,2}$/.test(g)) {
+    return parseFloat(g.replace(',', '.'));
+  }
+  if (/^\d+\.\d{1,2}$/.test(g)) {
+    return parseFloat(g);
+  }
+  if (/^\d{1,3}(?:\.\d{3})+$/.test(g)) {
+    return parseFloat(g.replace(/\./g, ''));
+  }
+  if (/^\d+$/.test(g)) {
+    return parseInt(g, 10);
+  }
+  return null;
+}
+
+/**
+ * Interpreta um texto bruto de frete exibido na PDP (não o router).
+ * @param {string} raw
+ * @returns {{ text: string; price: number; is_free: boolean } | null}
+ */
+export function parsePdpShippingLine(raw) {
+  const s0 = String(raw || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[\u200b\u00a0]/g, '')
+    .trim();
+  if (s0.length < 4 || s0.length > 32_000) return null;
+  const lower = s0.toLowerCase();
+  if (!/frete|entrega|envio|shipping|delivery|gr[áa]tis|gratis|free/.test(lower)) {
+    return null;
+  }
+  const noise = /cookie|privacidade|termos|newsletter|baixe o app|baixar app/i;
+  if (noise.test(lower)) return null;
+
+  // Valor: preferir padrão "Frete/Entrega ... R$ X"; senão R$ genérico só se o texto for claramente de frete
+  let m = s0.match(
+    /(?:^|[\s(])(?:frete|entrega|envio|shipping|delivery)\s*R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+(?:[.,]\d{1,2})?)(?![\d.,])/i
+  );
+  if (!m) {
+    const m2 = s0.match(
+      /R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+(?:[.,]\d{1,2})?)(?![\d.,0-9])/i
+    );
+    if (m2 && /(?:frete|entrega|envio|shipping|delivery|pedido|neste pedido|para o)/i.test(s0)) {
+      m = m2;
+    }
+  }
+  if (m) {
+    const n = parseBrlMoneyToken(m[1] ?? '');
+    if (n == null || !Number.isFinite(n) || n < 0) return null;
+    if (n === 0) {
+      return { text: s0, price: 0, is_free: true };
+    }
+    return { text: s0, price: n, is_free: false };
+  }
+
+  if (
+    /(?:^|\b)(?:frete|entrega|envio|shipping|delivery)\s+gr[áa]tis\b/i.test(s0) ||
+    (/\bgr[áa]tis\b|\bgratis\b|free\s+shipping|sem\s+custo\s+de\s+entrega|envio\s+gr[áa]tis|entrega\s+gr[áa]tis/i.test(
+      s0
+    ) &&
+      /frete|entrega|envio|shipping|delivery/i.test(lower))
+  ) {
+    return { text: s0, price: 0, is_free: true };
+  }
+  if (/^free shipping$/i.test(s0.trim()) || /^\s*free shipping\s*$/i.test(s0)) {
+    return { text: s0, price: 0, is_free: true };
+  }
+  return null;
+}
+
+/**
+ * @param {{ text: string; price: number; is_free: boolean } | null} p
+ * @param {string} original
+ */
+function scorePdpShippingParse(p, original) {
+  if (!p) return -1;
+  let sc = 0;
+  const t = String(original);
+  if (/^frete\s+R\$/i.test(t) || /^entrega.*R\$/i.test(t)) sc += 40;
+  if (/\bfrete\s+R\$/i.test(t)) sc += 30;
+  if (t.length <= 100) sc += 20;
+  if (t.length <= 50) sc += 10;
+  if (p.is_free && p.price === 0) sc += 25;
+  if (p.is_free) sc += 5;
+  if (typeof p.price === 'number' && p.price > 0) sc += 15;
+  if (/^frete\s+gr[áa]tis/i.test(t) || /^entrega\s+gr[áa]tis/i.test(t)) sc += 15;
+  return sc;
+}
+
+/**
+ * @param {string[]} dedup
+ */
+function pickBestPdpShippingFromDedup(dedup) {
+  /** @type {{ parse: { text: string; price: number; is_free: boolean }; score: number; text: string }[]} */
+  const withScore = [];
+  for (const text of dedup) {
+    const p = parsePdpShippingLine(text);
+    if (!p) continue;
+    withScore.push({
+      text: p.text,
+      parse: p,
+      score: scorePdpShippingParse(p, text),
+    });
+  }
+  if (!withScore.length) return { selected: null, candidates: [] };
+  withScore.sort((a, b) => b.score - a.score);
+  return { selected: withScore[0] ?? null, candidates: withScore };
+}
+
+/**
+ * @param {import('puppeteer').Page} page
+ * @param {string} productUrl
+ * @param {string} winningText
+ */
+export async function logPdpShippingSelectedHtml(page, productUrl, winningText) {
+  const t = String(winningText || '').replace(/\s+/g, ' ').trim();
+  const product_url = String(productUrl || '').trim() || '(unknown)';
+  if (!t || !page) {
+    console.log('[shipping selected html]', { product_url, html: null });
+    return;
+  }
+  const html = await page
+    .evaluate((target) => {
+      const norm = (s) => (s && String(s).replace(/\s+/g, ' ').trim()) || '';
+      const tgt = String(target).replace(/\s+/g, ' ').trim();
+      for (const el of document.querySelectorAll('*')) {
+        if (norm(/** @type {Element} */ (el).innerText) === tgt) {
+          return /** @type {Element} */ (el).outerHTML || null;
+        }
+      }
+      return null;
+    }, t)
+    .catch(() => null);
+  console.log('[shipping selected html]', {
+    product_url,
+    html: html && String(html).length > 0 ? String(html) : null,
+  });
+}
+
+/**
+ * Lê frete a partir do DOM visível da PDP (prioridade frente ao router). Textos "unknown" reais: price = null.
+ * @param {import('puppeteer').Page} page
+ * @param {string} [productUrl]
+ * @returns {Promise<ReturnType<typeof normalizeShippingEntry> | null>}
+ */
+export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
+  const product_url = String(productUrl || '').split('#')[0] || '(unknown)';
+
+  const pack = await page
     .evaluate(() => {
-      /** @param {string} t */
-      function clean(t) {
-        return String(t || '')
-          .replace(/\s+/g, ' ')
-          .replace(/[\u200b\u00a0]/g, '')
-          .trim();
+      const MAX = 20_000;
+      const raw = /** @type {string[]} */ ([]);
+      const noise = (t) => /cookie|privacidade|termos|newsletter|baixe o app|tiktok shop app/i.test(t);
+      for (const el of document.querySelectorAll('*')) {
+        if (!el || el.innerText == null) continue;
+        const t = String(el.innerText).replace(/\s+/g, ' ').replace(/[\u200b\u00a0]/g, '').trim();
+        if (!t || t.length < 4 || t.length > MAX) continue;
+        if (noise(t)) continue;
+        const l = t.toLowerCase();
+        if (!/frete|entrega|gr[áa]tis|gratis|shipping|delivery|envio/.test(l)) continue;
+        raw.push(t);
       }
-
-      const noise = /cookie|privacidade|termos|tiktok shop|baixar|download|menu|footer|newsletter/i;
-      const candidates = [];
-
-      /** @param {string} t */
-      function consider(t) {
-        const s = clean(t);
-        if (s.length < 6 || s.length > 180) return;
-        if (noise.test(s)) return;
-        if (!/frete|envio|entrega|shipping|delivery/i.test(s)) return;
-        if (!/grátis|gratis|free|R\$|reais|calcul|a partir|prazo|dia|business/i.test(s)) return;
-        candidates.push(s);
-      }
-
-      const roots = document.querySelectorAll(
-        'main, [class*="product" i], [class*="shipping" i], [class*="logistic" i], [class*="delivery" i], [data-e2e*="shipping" i], [data-e2e*="logistic" i]'
-      );
       const seen = new Set();
-      for (const root of roots) {
-        root.querySelectorAll('span, div, p, li, strong, a').forEach((el) => {
-          const t = clean(el.textContent || '');
-          if (!t || t.length > 200) return;
-          const k = t.toLowerCase();
-          if (seen.has(k)) return;
-          seen.add(k);
-          consider(t);
+      const dedup = /** @type {string[]} */ ([]);
+      for (const t of raw) {
+        if (seen.has(t)) continue;
+        seen.add(t);
+        dedup.push(t);
+      }
+      // Diagnóstico: tudo o que bate com frete/entrega/shipping (não muda a lista `dedup` usada no parse)
+      const allTexts = Array.from(document.querySelectorAll('*'))
+        .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
+        .filter(Boolean)
+        .map((t) => (t.length > MAX ? t.slice(0, MAX) : t))
+        .filter((text) => {
+          const s = text.toLowerCase();
+          return (
+            s.includes('frete') ||
+            s.includes('grátis') ||
+            s.includes('gratis') ||
+            s.includes('entrega') ||
+            s.includes('shipping')
+          );
         });
-      }
-
-      if (!candidates.length) return null;
-
-      candidates.sort((a, b) => {
-        const sa = scoreShippingLine(a);
-        const sb = scoreShippingLine(b);
-        if (sb !== sa) return sb - sa;
-        return a.length - b.length;
-      });
-      /** @param {string} s */
-      function scoreShippingLine(s) {
-        const x = s.toLowerCase();
-        let sc = 0;
-        if (/grátis|gratis|free|sem\s+frete/i.test(x)) sc += 4;
-        if (/R\$\s*[\d]/.test(s)) sc += 3;
-        if (/frete/i.test(x)) sc += 2;
-        if (/entrega|envio|delivery|prazo|dia/i.test(x)) sc += 1;
-        return sc;
-      }
-
-      const pick = candidates[0];
-      const lower = pick.toLowerCase();
-      const isFree =
-        /grátis|gratis|free\s+shipping|sem\s+frete|frete\s+gr|envio\s+gr/i.test(lower) ||
-        /\bgrátis\b|\bgratis\b/i.test(pick);
-      let price = null;
-      const m = pick.match(/R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+(?:[.,]\d{1,2})?)/);
-      if (m) {
-        const n = Number(m[1].replace(/\./g, '').replace(',', '.'));
-        if (Number.isFinite(n)) price = n;
-      }
-      return {
-        text: pick,
-        is_free: Boolean(isFree),
-        price: isFree ? 0 : price,
-      };
+      return { raw, dedup, allTexts };
     })
     .catch(() => null);
 
-  if (!raw || typeof raw !== 'object') return null;
-  const o = /** @type {Record<string, unknown>} */ (raw);
-  const text = String(o.text ?? '').trim();
-  if (!text) return null;
+  if (!pack || typeof pack !== 'object') {
+    return null;
+  }
+  const dedup = Array.isArray(pack.dedup) ? pack.dedup : [];
+  const allTexts = Array.isArray(pack.allTexts) ? pack.allTexts : [];
+
+  console.log('[shipping raw texts]', { product_url, texts: allTexts });
+
+  const { selected, candidates } = pickBestPdpShippingFromDedup(dedup);
+  const candidatesLog = candidates.map((c) => ({
+    text: c.text,
+    price: c.parse.price,
+    is_free: c.parse.is_free,
+    score: c.score,
+  }));
+  console.log('[shipping candidates]', { product_url, candidates: candidatesLog });
+  console.log('[shipping selected]', {
+    product_url,
+    selected: selected
+      ? { text: selected.text, score: selected.score, parse: selected.parse }
+      : null,
+  });
+
+  if (!selected) {
+    await logPdpShippingSelectedHtml(page, product_url, '');
+    return null;
+  }
+
+  const p = selected.parse;
+  if (!p.is_free && (p.price == null || !Number.isFinite(p.price))) {
+    return null;
+  }
+  if (!p.is_free && p.price < 0) {
+    return null;
+  }
+
+  await logPdpShippingSelectedHtml(page, product_url, p.text);
+
   return {
-    text,
-    is_free: Boolean(o.is_free),
-    price: o.price === 0 ? 0 : o.price != null ? Number(o.price) : null,
+    text: p.text,
+    is_free: p.is_free,
+    price: p.is_free ? 0 : p.price,
     original_price: null,
     delivery_name: '',
     shipping_type: '',
+    delivery_min_days: null,
+    delivery_max_days: null,
   };
 }
 

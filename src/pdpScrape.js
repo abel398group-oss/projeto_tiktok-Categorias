@@ -323,22 +323,36 @@ function applyPdpRouterSoldFallback(row) {
 
 async function mergeDomShippingIntoRouterRow(page, routerRow) {
   if (!routerRow || typeof routerRow !== 'object') return;
-  const sh = routerRow.shipping;
-  if (
-    sh &&
-    typeof sh === 'object' &&
-    String(sh.text || '').trim() &&
-    String(sh.text) !== 'unknown'
-  ) {
-    return;
-  }
-  const dom = await extractPdpShippingDom(page);
-  if (!dom) return;
+  const productUrl = String(
+    (typeof page?.url === 'function' ? page.url() : '') || ''
+  ).split('#')[0];
   const base =
     routerRow.shipping && typeof routerRow.shipping === 'object'
       ? normalizeShippingEntry(routerRow.shipping)
       : emptyShipping();
-  routerRow.shipping = mergeShippingPreferComplete(base, dom);
+  const dom = await extractPdpShippingDom(page, productUrl);
+  if (dom) {
+    routerRow.shipping = {
+      ...base,
+      text: String(dom.text ?? ''),
+      is_free: dom.is_free === true,
+      price: dom.is_free ? 0 : /** @type {number} */ (dom.price),
+      original_price: dom.original_price != null ? dom.original_price : base.original_price,
+      delivery_name: base.delivery_name,
+      shipping_type: base.shipping_type,
+      delivery_min_days: base.delivery_min_days,
+      delivery_max_days: base.delivery_max_days,
+    };
+    return;
+  }
+  if (String(base.text) === 'unknown' || !String(base.text || '').trim()) {
+    routerRow.shipping = {
+      ...base,
+      price: null,
+      is_free: false,
+      text: 'unknown',
+    };
+  }
 }
 
 /**
