@@ -11,7 +11,7 @@ import { config } from './config.js';
 import { launchBrowser } from './browser.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { sleep } from './util.js';
-import { parseSoldCountFromDisplayText } from './soldParse.js';
+import { parseSoldCountFromDisplayText, pickMaxSoldFromVendidoTexts } from './soldParse.js';
 
 const SAMPLE_N = Math.min(25, Math.max(1, Number(process.env.VERIFY_SAMPLE_N) || 10));
 const JSON_PATH = path.resolve(config.masterSnapshotOutputJson);
@@ -70,25 +70,24 @@ async function extractPdpSnapshot(page) {
           .replace(/\s+/g, ' ')
           .trim()
       : '';
-    /** @type {string | null} */
-    let domSold = null;
-    const cands = [];
+    const domSoldSeen = new Set();
+    /** @type {string[]} */
+    const domSoldTexts = [];
     document
       .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"]')
       .forEach((el) => {
         const raw = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
         if (!raw || raw.length > 120) return;
-        if (/\bvendido/i.test(raw)) cands.push(raw);
+        if (!/\bvendido/i.test(raw)) return;
+        if (domSoldSeen.has(raw)) return;
+        domSoldSeen.add(raw);
+        domSoldTexts.push(raw);
       });
-    if (cands.length) {
-      cands.sort((a, b) => b.length - a.length);
-      domSold = cands[0];
-    }
     return {
       text: text.slice(0, 12_000),
       title: title.replace(/\s+/g, ' ').trim().slice(0, 500),
       shop,
-      dom_sold_text: domSold,
+      dom_sold_texts: domSoldTexts,
     };
   });
 }
@@ -185,10 +184,26 @@ async function main() {
         const pdp = parseBrMoneyFromString(fullText);
         const pdpTitle = String(snap.title || '');
         const pdpShop = String(snap.shop || '');
-        const domSold = snap.dom_sold_text != null ? String(snap.dom_sold_text) : '';
+        const pickSold = pickMaxSoldFromVendidoTexts(
+          Array.isArray(snap.dom_sold_texts) ? snap.dom_sold_texts : []
+        );
+        console.log('[sold candidates]', {
+          texts: pickSold.texts,
+          parsed: pickSold.parsed,
+          selected: pickSold.selected,
+        });
+        const domSold = String(pickSold.winningText || '');
         const soldSource = domSold && domSold.trim() ? domSold : fullText;
-        const pdpSold = parseSoldCountFromDisplayText(soldSource);
-        console.log('[sold debug]', { dom_text: domSold || soldSource.slice(0, 80), parsed_value: pdpSold });
+        const pdpSold =
+          pickSold.count != null
+            ? pickSold.count
+            : parseSoldCountFromDisplayText(soldSource);
+        console.log('[sold source]', {
+          source: pickSold.texts.length ? 'pdp_dom' : 'text_fallback',
+          dom_text: domSold || null,
+          parsed_value: pdpSold,
+          router_value: null,
+        });
 
         row.pdp = {
           title: pdpTitle.slice(0, 100),

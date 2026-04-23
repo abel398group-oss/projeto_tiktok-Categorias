@@ -198,6 +198,11 @@ export const config = {
     './output/categories.json',
   masterSnapshotOutputJson:
     process.env.MASTER_SNAPSHOT_OUTPUT_JSON || './output/master_category_snapshots.json',
+  /**
+   * Saída incremental (JSONL) do mesmo fluxo; uma linha JSON por produto, em tempo real.
+   * Vazio = deriva trocando `.json` por `.jsonl` no `masterSnapshotOutputJson`.
+   */
+  masterSnapshotOutputJsonl: (process.env.MASTER_SNAPSHOT_OUTPUT_JSONL || '').trim() || null,
   /** Pausa entre visitas a categorias master (ms). */
   masterSnapshotCategoryDelayMs: numEnv('MASTER_SNAPSHOT_CATEGORY_DELAY_MS', 4500),
   /** Após networkidle, espera curta antes de ler o SSR. */

@@ -36,17 +36,79 @@ export function parseSoldCountFromDisplayText(text) {
 }
 
 /**
+ * A PDP pode ter vários nós com "vendido(s)" (ex.: variante 247 vs total 10.2K).
+ * Deduplica textos, faz parse de cada um e devolve o maior valor.
+ *
+ * @param {readonly (string | null | undefined)[]} rawCandidates
+ * @returns {{
+ *   winningText: string;
+ *   count: number | null;
+ *   texts: string[];
+ *   parsed: (number | null)[];
+ *   selected: number | null;
+ * }}
+ */
+export function pickMaxSoldFromVendidoTexts(rawCandidates) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const list = [];
+  for (const x of rawCandidates || []) {
+    const t = String(x ?? '').trim();
+    if (!t) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    list.push(t);
+  }
+  if (!list.length) {
+    return { winningText: '', count: null, texts: [], parsed: [], selected: null };
+  }
+  const parsed = list.map((text) => parseSoldCountFromDisplayText(text));
+  let bestN = -1;
+  let bestIdx = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const n = parsed[i];
+    if (n == null || !Number.isFinite(n)) continue;
+    const fn = Math.floor(n);
+    if (fn > bestN) {
+      bestN = fn;
+      bestIdx = i;
+    }
+  }
+  if (bestN < 0) {
+    return {
+      winningText: list[0],
+      count: null,
+      texts: list,
+      parsed,
+      selected: null,
+    };
+  }
+  return {
+    winningText: list[bestIdx],
+    count: Math.max(0, bestN),
+    texts: list,
+    parsed,
+    selected: Math.max(0, bestN),
+  };
+}
+
+/**
  * Parse de um token tipo "1.3K", "1,3K", "2M", "10".
  * @param {string} token
  * @returns {number | null}
  */
 function magnitudeTokenToInt(/** @type {string} */ token) {
-  const s = String(token).trim();
-  if (!s) return null;
-  const m = s.match(/([\d.,]+)\s*([KkMmBb])?/i);
+  const s0 = String(token).trim();
+  if (!s0) return null;
+  // "45.5K" (sufixo colado) vs "1.3" + "K" separado
+  const m = s0.match(/^([\d.,]+)\s*([KkMmBb])?$/i) || s0.match(/^([\d.,]+)([KkMmBb])$/i);
   if (!m) return null;
   const numS = m[1];
-  const suf = (m[2] || '').toLowerCase();
+  let suf = (m[2] || '').toLowerCase();
+  if (!suf) {
+    const t = s0.match(/[KkMmBb](?![a-z])/i);
+    if (t) suf = t[0].toLowerCase();
+  }
   let n0;
   if (suf) {
     if (/^\d{1,3}(?:\.\d{3})+,\d{1,2}$/.test(numS)) {

@@ -122,7 +122,6 @@ function mergeSalesCount(prev, inc, prevChain, incomingProv) {
   const iOk = Number.isFinite(i);
   if (!iOk) return pOk ? p : 0;
   if (!pOk) return Math.max(0, i);
-  if (i === 0 && p > 0) return p;
   if (Math.abs(i - p) < 1e-9) return p;
   return incomingWinsConflict(prevChain, incomingProv) ? i : p;
 }
@@ -498,7 +497,14 @@ export function fromLegacyRow(row) {
       if (psc != null && Number.isFinite(Number(psc))) {
         return Math.max(0, Math.floor(Number(psc)));
       }
-      return num(String(row.total_vendas || '').replace(/[^\d.]/g, ''));
+      if (row.sold_from_pdp_dom === true) {
+        return null;
+      }
+      const tv = str(row.total_vendas).trim();
+      if (tv && /^\d+$/.test(tv)) {
+        return Math.max(0, parseInt(tv, 10));
+      }
+      return null;
     })(),
     taxonomy_path: taxoStr,
     url: link,
