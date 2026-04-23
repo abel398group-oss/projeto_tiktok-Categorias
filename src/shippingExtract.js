@@ -308,7 +308,7 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
         seen.add(t);
         dedup.push(t);
       }
-      // Diagnóstico: tudo o que bate com frete/entrega/shipping (não muda a lista `dedup` usada no parse)
+      // Diagnóstico amplo (não altera `raw` / `dedup` usados no parse)
       const allTexts = Array.from(document.querySelectorAll('*'))
         .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
         .filter(Boolean)
@@ -320,7 +320,8 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
             s.includes('grátis') ||
             s.includes('gratis') ||
             s.includes('entrega') ||
-            s.includes('shipping')
+            s.includes('shipping') ||
+            /R\$/i.test(text)
           );
         });
       return { raw, dedup, allTexts };
@@ -331,9 +332,9 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
     return null;
   }
   const dedup = Array.isArray(pack.dedup) ? pack.dedup : [];
-  const allTexts = Array.isArray(pack.allTexts) ? pack.allTexts : [];
+  const texts = Array.isArray(pack.allTexts) ? pack.allTexts : [];
 
-  console.log('[shipping raw texts]', { product_url, texts: allTexts });
+  console.log('[shipping raw texts]', texts);
 
   const { selected, candidates } = pickBestPdpShippingFromDedup(dedup);
   const candidatesLog = candidates.map((c) => ({
