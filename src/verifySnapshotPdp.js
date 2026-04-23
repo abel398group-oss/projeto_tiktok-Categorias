@@ -11,7 +11,25 @@ import { config } from './config.js';
 import { launchBrowser } from './browser.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { sleep } from './util.js';
-import { parseSoldCountFromDisplayText, pickMaxSoldFromVendidoTexts } from './soldParse.js';
+import {
+  pickMaxSoldFromVendidoTexts,
+  pdpVendidoVisiblePhraseLooksConfident,
+} from './soldParse.js';
+
+/**
+ * Igual a pdpScrape: só frase com "vendido(s)", sem "sale", com heurística confiante.
+ * @param {string | null | undefined} s0
+ */
+function pdpVendidoDomSourceAllowed(s0) {
+  const s = String(s0 || '')
+    .replace(/[\u00a0\u202f\u200b]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return false;
+  if (/\bsale\b/i.test(s)) return false;
+  if (!/vendidos?/i.test(s)) return false;
+  return pdpVendidoVisiblePhraseLooksConfident(s);
+}
 
 const SAMPLE_N = Math.min(25, Math.max(1, Number(process.env.VERIFY_SAMPLE_N) || 10));
 const JSON_PATH = path.resolve(config.masterSnapshotOutputJson);
@@ -71,24 +89,46 @@ async function extractPdpSnapshot(page) {
           .trim()
       : '';
     const MAX_LEN = 32_000;
-    const allVend = Array.from(document.querySelectorAll('*'))
-      .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
-      .filter(Boolean)
-      .filter((text) => text.length <= MAX_LEN)
-      .filter((text) => text.toLowerCase().includes('vendido'));
-    const domSoldSeen = new Set();
+    const TAGS = 'span,div,p,strong,a,b,[class*="H3"],[data-e2e]';
     /** @type {string[]} */
     const domSoldTexts = [];
-    for (const t of allVend) {
-      if (domSoldSeen.has(t)) continue;
-      domSoldSeen.add(t);
-      domSoldTexts.push(t);
+    /** @type {Record<string, string> | null} */
+    let dom_sold_local_scope = null;
+    const titleH1 = document.querySelector('h1');
+    if (titleH1 && titleH1.parentElement) {
+      const sc = titleH1.parentElement;
+      dom_sold_local_scope = {
+        kind: 'h1_parent',
+        titleSelector: 'h1',
+        containerTag: sc.tagName || '',
+        containerClass: String(sc.className || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 200),
+        dataE2e: sc.getAttribute('data-e2e') || '',
+      };
+      const domSeen = new Set();
+      for (const el of sc.querySelectorAll(TAGS)) {
+        if (!el) continue;
+        const t = (el.innerText != null ? el.innerText : el.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (t.length < 4 || t.length > MAX_LEN) continue;
+        if (/\bsale\b/i.test(t)) continue;
+        if (!/vendidos?/i.test(t)) continue;
+        if (domSeen.has(t)) continue;
+        domSeen.add(t);
+        domSoldTexts.push(t);
+      }
+    } else {
+      dom_sold_local_scope = { kind: 'none', reason: titleH1 ? 'no_parent' : 'no_h1' };
     }
     return {
       text: text.slice(0, 12_000),
       title: title.replace(/\s+/g, ' ').trim().slice(0, 500),
       shop,
       dom_sold_texts: domSoldTexts,
+      dom_sold_local_scope,
     };
   });
 }
@@ -185,23 +225,36 @@ async function main() {
         const pdp = parseBrMoneyFromString(fullText);
         const pdpTitle = String(snap.title || '');
         const pdpShop = String(snap.shop || '');
-        const pickSold = pickMaxSoldFromVendidoTexts(
-          Array.isArray(snap.dom_sold_texts) ? snap.dom_sold_texts : []
-        );
-        console.log('[sold candidates]', pickSold.candidates);
-        console.log('[sold selected]', pickSold.best);
-        const domSold = String(pickSold.winningText || '');
-        const soldSource = domSold && domSold.trim() ? domSold : fullText;
-        const pdpSold =
-          pickSold.count != null
-            ? pickSold.count
-            : parseSoldCountFromDisplayText(soldSource);
-        console.log('[sold source]', {
-          source: pickSold.texts.length ? 'pdp_dom' : 'text_fallback',
-          dom_text: domSold || null,
-          parsed_value: pdpSold,
-          router_value: null,
+        const soldCands = Array.isArray(snap.dom_sold_texts) ? snap.dom_sold_texts : [];
+        const scopeS =
+          snap.dom_sold_local_scope && typeof snap.dom_sold_local_scope === 'object'
+            ? /** @type {Record<string, unknown>} */ (snap.dom_sold_local_scope)
+            : null;
+        const allowed = soldCands.filter((t) => pdpVendidoDomSourceAllowed(t));
+        console.log('[sold local scope]', { product_url: url, .../** @type {Record<string, unknown>} */(scopeS || {}) });
+        console.log('[sold dom local texts]', {
+          product_url: url,
+          all_from_scope: soldCands,
+          allowed_from_scope: allowed,
         });
+        const pickSold = pickMaxSoldFromVendidoTexts(allowed);
+        if (allowed.length && pickSold.count != null && pdpVendidoDomSourceAllowed(pickSold.winningText)) {
+          console.log('[sold dom selected]', { product_url: url, text: pickSold.winningText, count: pickSold.count });
+        } else {
+          console.log('[sold blocked non-visible source]', {
+            product_url: url,
+            note: 'no_allowed_vendido_phrase_in_h1_parent',
+          });
+        }
+        const win =
+          pickSold.count != null && String(pickSold.winningText || '').trim() && pdpVendidoDomSourceAllowed(pickSold.winningText)
+            ? String(pickSold.winningText).trim()
+            : '';
+        const domSold = win;
+        const pdpSold =
+          pickSold.count != null && Number.isFinite(/** @type {number} */(pickSold.count)) && win
+            ? /** @type {number} */(pickSold.count)
+            : null;
 
         row.pdp = {
           title: pdpTitle.slice(0, 100),

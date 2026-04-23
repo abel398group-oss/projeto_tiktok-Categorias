@@ -1,10 +1,33 @@
 /**
+ * Só aceita padrão visível tipo "851 vendido(s)", "0 vendido(s)", "1,3K+ vendido(s)".
+ * Rejeita blocos com preço/ruído (ex. R$) e textos muito longos.
+ *
+ * @param {string | null | undefined} s0
+ * @returns {boolean}
+ */
+export function pdpVendidoVisiblePhraseLooksConfident(s0) {
+  const s = String(s0 || '')
+    .replace(/[\u00a0\u202f\u200b]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s || s.length > 200) return false;
+  if (/R\$\s*[\d.,]/i.test(s)) return false;
+  if (/%/i.test(s) && s.length > 40) return false;
+  if (!/vendidos?(?:\([^)]*\))?/i.test(s)) return false;
+  // 0, 3, 851, 1.2K, 1,2K, 1.200 (milhor BR), 20,1K
+  return /(?:^|[\s(])(0|(?:[0-9]+[.,]\d+[KkMm]|[0-9]+[KkMm]|[1-9]\d{0,2}(?:\.\d{3})*|[0-9]{1,7}))\s*\+?\s*vendidos?(?:\([^)]*\))?/i.test(
+    s
+  );
+}
+
+/**
  * Converte texto visível (PDP / vitrine) em quantidade de vendas.
  * Ex.: "1.3K vendido(s)" → 1300, "72" → 72, "2M" → 2_000_000
  *
  * @param {string | null | undefined} text
  * @returns {number | null}
  */
+
 export function parseSoldCountFromDisplayText(text) {
   if (text == null) return null;
   const s0 = String(text).trim();
@@ -110,6 +133,74 @@ export function pickMaxSoldFromVendidoTexts(rawCandidates) {
     texts: list,
     parsed,
     selected: count,
+  };
+}
+
+/**
+ * Mesma ordem de `rawCandidates` (já deves ter escopo local, ex. cima do título primeiro).
+ * Primeiro parse com `parseSoldCountFromDisplayText` != null; não compara tamanhos entre candidatos.
+ *
+ * @param {readonly (string | null | undefined)[]} rawCandidates
+ * @returns {{
+ *   candidates: { text: string; value: number | null }[];
+ *   best: { text: string; value: number } | null;
+ *   winningText: string;
+ *   count: number | null;
+ *   texts: string[];
+ *   parsed: (number | null)[];
+ *   selected: number | null;
+ * }}
+ */
+export function pickFirstValidSoldFromVendidoTexts(rawCandidates) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const list = [];
+  for (const x of rawCandidates || []) {
+    const t = String(x ?? '').trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    list.push(t);
+  }
+  if (!list.length) {
+    return {
+      candidates: [],
+      best: null,
+      winningText: '',
+      count: null,
+      texts: [],
+      parsed: [],
+      selected: null,
+    };
+  }
+  /** @type {{ text: string; value: number | null }[]} */
+  const candidates = list.map((text) => ({
+    text,
+    value: parseSoldCountFromDisplayText(text),
+  }));
+  const parsed = candidates.map((c) => c.value);
+  for (const c of candidates) {
+    if (c.value == null) continue;
+    const n = Number(c.value);
+    if (!Number.isFinite(n) || n < 0) continue;
+    const v = Math.max(0, Math.floor(n));
+    return {
+      candidates,
+      best: { text: c.text, value: v },
+      winningText: c.text,
+      count: v,
+      texts: list,
+      parsed,
+      selected: v,
+    };
+  }
+  return {
+    candidates,
+    best: null,
+    winningText: list[0] || '',
+    count: null,
+    texts: list,
+    parsed,
+    selected: null,
   };
 }
 

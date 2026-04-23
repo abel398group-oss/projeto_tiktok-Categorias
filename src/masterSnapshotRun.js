@@ -12,7 +12,6 @@ import { launchBrowser } from './browser.js';
 import { writeFileAtomic, sleep } from './util.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { extractDashboardProductsFromSsr } from './masterSnapshotSsr.js';
-import { normalizeShippingEntry } from './shippingExtract.js';
 
 /**
  * @param {unknown} raw
@@ -100,6 +99,12 @@ async function main() {
   console.info('[master-snapshots] jsonl (incremental):', jsonlPath);
   console.info('[master-snapshots] run_id:', runId);
   console.info('[master-snapshots] categorias master:', masters.length);
+  const maxProductsOut = config.masterSnapshotMaxProducts;
+  if (maxProductsOut != null) {
+    console.info('[master-snapshots] teto de produtos (MASTER_SNAPSHOT_MAX_PRODUCTS):', maxProductsOut);
+  } else {
+    console.info('[master-snapshots] teto de produtos: nenhum (ilimitado)');
+  }
 
   /** @type {Record<string, unknown>[]} */
   const items = [];
@@ -117,6 +122,15 @@ async function main() {
     });
 
     for (let i = 0; i < masters.length; i += 1) {
+      if (maxProductsOut != null && items.length >= maxProductsOut) {
+        console.info(
+          '[master-snapshots] interrompido: já há',
+          items.length,
+          'produtos (teto',
+          String(maxProductsOut) + ').',
+        );
+        break;
+      }
       const cat = masters[i];
       const snapshotAt = new Date().toISOString();
       console.info(`[master-snapshots] (${i + 1}/${masters.length}) ${cat.name}`);
@@ -162,6 +176,7 @@ async function main() {
 
       const rows = await extractDashboardProductsFromSsr(page);
       for (const row of rows) {
+        if (maxProductsOut != null && items.length >= maxProductsOut) break;
         const r = /** @type {Record<string, unknown>} */ (row);
         const pid = String(r.product_id ?? '');
         const purl = sanitizeProductUrlOutput(r.product_url, pid, cat.url);
@@ -192,9 +207,6 @@ async function main() {
           sold_text: String(r.sold_text ?? '').trim(),
           sold_count:
             typeof r.sold_count === 'number' && isFinite(r.sold_count) ? r.sold_count : null,
-          shipping: normalizeShippingEntry(
-            r.shipping && typeof r.shipping === 'object' ? r.shipping : null
-          ),
           rating: typeof r.rating === 'number' && isFinite(r.rating) ? r.rating : null,
           rating_count:
             typeof r.rating_count === 'number' && isFinite(r.rating_count)

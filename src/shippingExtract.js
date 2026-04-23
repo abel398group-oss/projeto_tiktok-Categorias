@@ -173,7 +173,26 @@ export function parsePdpShippingLine(raw) {
   const noise = /cookie|privacidade|termos|newsletter|baixe o app|baixar app/i;
   if (noise.test(lower)) return null;
 
-  // Valor: preferir padrão "Frete/Entrega ... R$ X"; senão R$ genérico só se o texto for claramente de frete
+  // PDP: "Frete grátis" / "Frete R$ 9,60 neste pedido" (span H2, etc.) — fonte principal
+  if (/\bfrete\s*gr[áa]tis\b/i.test(s0)) {
+    return { text: s0, price: 0, is_free: true };
+  }
+  {
+    const mFr = s0.match(
+      /\bfrete\s*R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{1,2}|\d+,\d{2})/i
+    );
+    if (mFr) {
+      const n = parseBrlMoneyToken(mFr[1] ?? '');
+      if (n != null && Number.isFinite(n) && n >= 0) {
+        if (n === 0) {
+          return { text: s0, price: 0, is_free: true };
+        }
+        return { text: s0, price: n, is_free: false };
+      }
+    }
+  }
+
+  // Valor: "Entrega/Envio R$" ou fallback controlado
   let m = s0.match(
     /(?:^|[\s(])(?:frete|entrega|envio|shipping|delivery)\s*R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+(?:[.,]\d{1,2})?)(?![\d.,])/i
   );
@@ -217,6 +236,12 @@ function scorePdpShippingParse(p, original) {
   if (!p) return -1;
   let sc = 0;
   const t = String(original);
+  if (/\bfrete\s*R\$/i.test(t)) {
+    sc += 5000;
+  }
+  if (/\bfrete\s*gr[áa]tis\b/i.test(t)) {
+    sc += 5000;
+  }
   if (/^frete\s+R\$/i.test(t) || /^entrega.*R\$/i.test(t)) sc += 40;
   if (/\bfrete\s+R\$/i.test(t)) sc += 30;
   if (t.length <= 100) sc += 20;
@@ -244,7 +269,10 @@ function pickBestPdpShippingFromDedup(dedup) {
     });
   }
   if (!withScore.length) return { selected: null, candidates: [] };
-  withScore.sort((a, b) => b.score - a.score);
+  withScore.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return String(a.text).length - String(b.text).length;
+  });
   return { selected: withScore[0] ?? null, candidates: withScore };
 }
 
@@ -265,9 +293,9 @@ export async function logPdpShippingSelectedHtml(page, productUrl, winningText) 
       const norm = (s) => (s && String(s).replace(/\s+/g, ' ').trim()) || '';
       const tgt = String(target).replace(/\s+/g, ' ').trim();
       for (const el of document.querySelectorAll('*')) {
-        if (norm(/** @type {Element} */ (el).innerText) === tgt) {
-          return /** @type {Element} */ (el).outerHTML || null;
-        }
+        const node = /** @type {Element} */ (el);
+        if (norm(node.innerText) === tgt) return node.outerHTML || null;
+        if (norm(node.textContent) === tgt) return node.outerHTML || null;
       }
       return null;
     }, t)
@@ -290,27 +318,14 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
   const pack = await page
     .evaluate(() => {
       const MAX = 20_000;
-      const raw = /** @type {string[]} */ ([]);
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').replace(/[\u200b\u00a0]/g, '').trim();
       const noise = (t) => /cookie|privacidade|termos|newsletter|baixe o app|tiktok shop app/i.test(t);
-      for (const el of document.querySelectorAll('*')) {
-        if (!el || el.innerText == null) continue;
-        const t = String(el.innerText).replace(/\s+/g, ' ').replace(/[\u200b\u00a0]/g, '').trim();
-        if (!t || t.length < 4 || t.length > MAX) continue;
-        if (noise(t)) continue;
-        const l = t.toLowerCase();
-        if (!/frete|entrega|gr[áa]tis|gratis|shipping|delivery|envio/.test(l)) continue;
-        raw.push(t);
-      }
-      const seen = new Set();
-      const dedup = /** @type {string[]} */ ([]);
-      for (const t of raw) {
-        if (seen.has(t)) continue;
-        seen.add(t);
-        dedup.push(t);
-      }
-      // Diagnóstico amplo (não altera `raw` / `dedup` usados no parse)
+
+      const textFrom = (el) => norm(/** @type {Element} */ (el).textContent);
+
+      /** Textos alinhados à PDP: innerText muitas vezes omite; textContent lê a árvore. */
       const allTexts = Array.from(document.querySelectorAll('*'))
-        .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
+        .map((el) => (el && el.textContent != null ? String(el.textContent).replace(/\s+/g, ' ').trim() : ''))
         .filter(Boolean)
         .map((t) => (t.length > MAX ? t.slice(0, MAX) : t))
         .filter((text) => {
@@ -324,7 +339,73 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
             /R\$/i.test(text)
           );
         });
-      return { raw, dedup, allTexts };
+
+      const raw = /** @type {string[]} */ ([]);
+      for (const el of document.querySelectorAll('*')) {
+        if (!el) continue;
+        const t = textFrom(el);
+        if (!t || t.length < 4 || t.length > MAX) continue;
+        if (noise(t)) continue;
+        const l = t.toLowerCase();
+        if (
+          !l.includes('frete') &&
+          !l.includes('grátis') &&
+          !l.includes('gratis') &&
+          !l.includes('entrega') &&
+          !l.includes('shipping') &&
+          !/R\$/.test(t)
+        ) {
+          continue;
+        }
+        raw.push(t);
+      }
+      const seen = new Set();
+      const dedup = /** @type {string[]} */ ([]);
+      for (const t of raw) {
+        if (seen.has(t)) continue;
+        seen.add(t);
+        dedup.push(t);
+      }
+
+      /** "Frete R$" / "Frete grátis" em qualquer nó. */
+      const extraPrimary = /** @type {string[]} */ ([]);
+      for (const el of document.querySelectorAll('*')) {
+        if (!el) continue;
+        const t = textFrom(el);
+        if (!t || t.length < 4 || t.length > MAX) continue;
+        if (!/\bfrete\s*R\$/i.test(t) && !/\bfrete\s*gr[áa]tis\b/i.test(t)) continue;
+        extraPrimary.push(t);
+      }
+
+      /** Fallback: spans de UI da PDP com tipografia conhecida. */
+      const h2Semibold = /** @type {string[]} */ ([]);
+      for (const el of document.querySelectorAll('span.H2-Semibold')) {
+        if (!el) continue;
+        const t = textFrom(el);
+        if (!t || t.length < 4 || t.length > MAX) continue;
+        if (!/frete/i.test(t)) continue;
+        h2Semibold.push(t);
+      }
+
+      const seenOrd = new Set();
+      const dedupOrdered = /** @type {string[]} */ ([]);
+      for (const t of extraPrimary) {
+        if (seenOrd.has(t)) continue;
+        seenOrd.add(t);
+        dedupOrdered.push(t);
+      }
+      for (const t of dedup) {
+        if (seenOrd.has(t)) continue;
+        seenOrd.add(t);
+        dedupOrdered.push(t);
+      }
+      for (const t of h2Semibold) {
+        if (seenOrd.has(t)) continue;
+        seenOrd.add(t);
+        dedupOrdered.push(t);
+      }
+
+      return { raw, dedup: dedupOrdered, allTexts };
     })
     .catch(() => null);
 
@@ -332,9 +413,9 @@ export async function extractPdpShippingDom(page, productUrl = '(unknown)') {
     return null;
   }
   const dedup = Array.isArray(pack.dedup) ? pack.dedup : [];
-  const texts = Array.isArray(pack.allTexts) ? pack.allTexts : [];
+  const allTexts = Array.isArray(pack.allTexts) ? pack.allTexts : [];
 
-  console.log('[shipping raw texts]', texts);
+  console.log('[shipping raw texts]', allTexts);
 
   const { selected, candidates } = pickBestPdpShippingFromDedup(dedup);
   const candidatesLog = candidates.map((c) => ({

@@ -8,7 +8,10 @@ import {
   normalizeShippingEntry,
 } from './shippingExtract.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
-import { parseSoldCountFromDisplayText, pickMaxSoldFromVendidoTexts } from './soldParse.js';
+import {
+  pickMaxSoldFromVendidoTexts,
+  pdpVendidoVisiblePhraseLooksConfident,
+} from './soldParse.js';
 
 /** Limites para extração no router PDP (passados ao `page.evaluate`). */
 function pdpRouterEvaluateLimits() {
@@ -22,7 +25,7 @@ function pdpRouterEvaluateLimits() {
 
 /**
  * Dá tempo à PDP hidratar / lazy render antes do `page.evaluate` de vendas.
- * Não altera a lógica de `pickMaxSoldFromVendidoTexts` — só esperas + scroll leve.
+ * Não altera a lógica de vendidos no parser — só esperas + scroll leve.
  * @param {import('puppeteer').Page} page
  */
 async function pdpPreSoldCollectionReady(page) {
@@ -47,6 +50,22 @@ function splitTaxonomyParts(s) {
   const t = String(s ?? '').trim();
   if (!t) return [];
   return t.split(/\s*>\s*/).map((x) => x.trim()).filter(Boolean);
+}
+
+/**
+ * Só frases de vendas visíveis com "vendido(s)"; rejeita "sale" (ingl.) e tudo o que a heurística confiante não endossa.
+ * Não usar números do router/JSON (product_model, global_sold) — aplicado só a texto vindo de nós do DOM.
+ * @param {string | null | undefined} s0
+ */
+function pdpVendidoDomSourceAllowed(s0) {
+  const s = String(s0 || '')
+    .replace(/[\u00a0\u202f\u200b]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return false;
+  if (/\bsale\b/i.test(s)) return false;
+  if (!/vendidos?/i.test(s)) return false;
+  return pdpVendidoVisiblePhraseLooksConfident(s);
 }
 
 /**
@@ -128,15 +147,13 @@ function enrichLegacyRowFromRouter(best, routerRow) {
     }
     best.sold_from_pdp_dom = true;
     best.sold_source = 'pdp_dom';
-  } else {
-    const tv = String(routerRow.total_vendas ?? '').trim();
-    if (tv) best.total_vendas = tv;
-    const psc = routerRow.product_sold_count;
-    if (psc != null && Number.isFinite(Number(psc))) {
-      best.product_sold_count = Math.floor(Number(psc));
-    }
-    if (routerRow.sold_source) best.sold_source = String(routerRow.sold_source);
+  } else if (String(routerRow.sold_source || '') === 'pdp_no_visible_vendido') {
+    best.total_vendas = '';
+    best.product_sold_count = null;
+    best.sold_from_pdp_dom = false;
+    best.sold_source = 'pdp_no_visible_vendido';
   }
+  /* Vendas: não copiar total_vendas / product_sold_count do router (métrica ≠ visível na PDP). */
   for (const key of ['shop_product_count', 'shop_review_count', 'shop_sold_count']) {
     const raw = routerRow[key];
     if (raw != null && raw !== '') {
@@ -246,10 +263,10 @@ async function logPdpSoldSelectedElementHtml(page, productUrl, winningText) {
 
 /**
  * Vendas na PDP: texto(s) visível(is) no DOM = fonte oficial (não sobrescrever com router depois).
- * Vários nós podem ter "vendido(s)" — usa o maior valor parseado.
+ * Candidatos já vêm por escopo local (acima do título); aqui: primeiro match com parse válido.
  * @param {Record<string, unknown> | null} row
  * @param {string | string[] | null | undefined} pdp_sold_dom_input um texto ou todos os candidatos do DOM
- * @param {{ product_url?: string; raw_dom_texts?: string[] } | null | undefined} [log]
+ * @param {{ product_url?: string; raw_dom_texts?: string[]; local_scope?: unknown } | null | undefined} [log]
  */
 function applyPdpDomSold(row, pdp_sold_dom_input, log) {
   if (!row || typeof row !== 'object') return null;
@@ -258,79 +275,133 @@ function applyPdpDomSold(row, pdp_sold_dom_input, log) {
     : pdp_sold_dom_input != null && String(pdp_sold_dom_input).trim()
       ? [String(pdp_sold_dom_input).trim()]
       : [];
-  if (!list.length) return null;
   const product_url = String(
     log?.product_url || row?.link_do_produto || row?.product_url || ''
   )
     .trim() || '(unknown)';
-  const routerBefore = String(row.total_vendas ?? '').trim();
-  const pick = pickMaxSoldFromVendidoTexts(list);
   const raw = log && Array.isArray(log.raw_dom_texts) ? log.raw_dom_texts : [];
-  console.log('[sold candidates]', pick.candidates);
-  console.log('[sold selected]', pick.best);
-  console.log('[sold candidates]', {
-    product_url,
-    candidates: pick.candidates.map((c) => ({ text: c.text, value: c.value })),
-  });
-  console.log('[sold selected]', { product_url, selected: pick.best });
-  console.log('[sold raw texts]', { product_url, texts: raw });
-  row.total_vendas = pick.winningText;
-  if (pick.count != null && Number.isFinite(pick.count)) {
-    row.product_sold_count = pick.count;
-  } else {
-    row.product_sold_count = null;
+  if (!list.length) {
+    console.log('[sold dom local texts]', {
+      product_url,
+      all_from_scope: list,
+      allowed_from_scope: [],
+      raw_node_texts: raw,
+    });
+    return null;
   }
+  const allowed = list.filter(pdpVendidoDomSourceAllowed);
+  console.log('[sold dom local texts]', {
+    product_url,
+    all_from_scope: list,
+    allowed_from_scope: allowed,
+    raw_node_texts: raw,
+  });
+  if (log?.local_scope && typeof log.local_scope === 'object' && !Array.isArray(log.local_scope)) {
+    console.log('[sold local scope]', { product_url, .../** @type {Record<string, unknown>} */(log.local_scope) });
+  }
+  if (!allowed.length) {
+    return null;
+  }
+  const pick = pickMaxSoldFromVendidoTexts(allowed);
+  if (pick.count == null || !Number.isFinite(pick.count)) {
+    return null;
+  }
+  const win = String(pick.winningText || '').trim();
+  if (!win || !pdpVendidoDomSourceAllowed(win)) {
+    return null;
+  }
+  row.total_vendas = win;
+  row.product_sold_count = Math.max(0, Math.floor(/** @type {number} */(pick.count)));
   row.sold_from_pdp_dom = true;
   row.sold_source = 'pdp_dom';
-  console.log('[sold source]', {
-    source: 'pdp_dom',
-    dom_text: pick.winningText,
-    parsed_value: row.product_sold_count,
-    router_value: routerBefore,
+  console.log('[sold dom selected]', {
+    product_url,
+    text: win,
+    count: pick.count,
   });
   return pick;
 }
 
 /**
- * Só quando **não** há texto "vendido" no DOM da PDP. Usa sold_count do router (product_model) já em `row.total_vendas`.
+ * Sem texto de vendas visível fidedigno no DOM: não reutilizar router/JSON (evita 29 / 4 / 131 de outra métrica).
  * @param {Record<string, unknown> | null} row
+ * @param {{ product_url?: string }} [opts]
  */
-function applyPdpRouterSoldFallback(row) {
+function applyPdpNoVisibleVendido(row, opts) {
   if (!row || typeof row !== 'object') return;
-  const routerValue = String(row.total_vendas ?? '').trim();
-  let n = null;
-  if (routerValue) {
-    if (/^\d+$/.test(routerValue)) {
-      n = parseInt(routerValue, 10);
-    } else {
-      n = parseSoldCountFromDisplayText(routerValue);
-    }
-  }
+  const product_url = String(opts?.product_url || row?.link_do_produto || row?.product_url || '').trim() || '(unknown)';
+  const hadText = String(row.total_vendas ?? '').trim();
+  const hadN = row.product_sold_count;
+  row.total_vendas = '';
+  row.product_sold_count = null;
   row.sold_from_pdp_dom = false;
-  row.sold_source = 'router_fallback';
-  if (n !== null && Number.isFinite(n)) {
-    row.product_sold_count = Math.max(0, Math.floor(n));
-  } else {
-    row.product_sold_count = null;
-  }
-  console.log('[sold source]', {
-    source: 'router_fallback',
-    dom_text: null,
-    parsed_value: row.product_sold_count,
-    router_value: routerValue,
+  row.sold_source = 'pdp_no_visible_vendido';
+  console.log('[sold blocked non-visible source]', {
+    product_url,
+    had_router_text: hadText,
+    had_router_count: hadN,
+    note: 'sem frase "vendido(s)" visível fidedigna; router/model não aplicável',
   });
 }
 
+/**
+ * Garante que o frete típico da PDP ("Frete R$ …" / "Frete grátis") tenha tempo para aparecer antes da coleta.
+ * Não altera parse/score em shippingExtract — só espera + scroll.
+ * @param {import('puppeteer').Page} page
+ */
+async function pdpPreShippingCollectionReady(page) {
+  await page
+    .waitForFunction(() => {
+      const text = document.body?.textContent || '';
+      return text.includes('Frete R$') || text.includes('Frete grátis');
+    }, { timeout: 10_000 })
+    .catch(() => {});
+  await page.waitForSelector('h1', { timeout: 10_000 }).catch(() => {});
+  await sleep(2000);
+  await page.evaluate(() => {
+    window.scrollBy(0, 600);
+  });
+  await sleep(1500);
+}
+
 async function mergeDomShippingIntoRouterRow(page, routerRow) {
-  if (!routerRow || typeof routerRow !== 'object') return;
-  const productUrl = String(
+  const urlHint = String(
     (typeof page?.url === 'function' ? page.url() : '') || ''
   ).split('#')[0];
+  const routerIsNull = routerRow == null;
+  const routerType = typeof routerRow;
+  console.log('[shipping merge enter]', {
+    product_url: urlHint || null,
+    merge_called: true,
+    routerRow_is_nullish: routerIsNull,
+    routerRow_type: routerType,
+  });
+  if (!routerRow || typeof routerRow !== 'object') {
+    console.log('[shipping merge early return]', {
+      product_url: urlHint || null,
+      reason: !routerRow ? 'routerRow_null_undefined' : 'routerRow_not_object',
+      routerRow_type: routerType,
+    });
+    return;
+  }
+  const productUrl = urlHint;
+  await pdpPreShippingCollectionReady(page);
   const base =
     routerRow.shipping && typeof routerRow.shipping === 'object'
       ? normalizeShippingEntry(routerRow.shipping)
       : emptyShipping();
   const dom = await extractPdpShippingDom(page, productUrl);
+  console.log('[shipping dom result]', {
+    product_url: productUrl || null,
+    has_dom: dom != null,
+    dom: dom
+      ? {
+          text: dom.text,
+          is_free: dom.is_free,
+          price: dom.price,
+        }
+      : null,
+  });
   if (dom) {
     routerRow.shipping = {
       ...base,
@@ -343,6 +414,11 @@ async function mergeDomShippingIntoRouterRow(page, routerRow) {
       delivery_min_days: base.delivery_min_days,
       delivery_max_days: base.delivery_max_days,
     };
+    console.log('[shipping final row]', {
+      product_url: productUrl || null,
+      path: 'dom_applied',
+      shipping: routerRow.shipping,
+    });
     return;
   }
   if (String(base.text) === 'unknown' || !String(base.text || '').trim()) {
@@ -352,14 +428,25 @@ async function mergeDomShippingIntoRouterRow(page, routerRow) {
       is_free: false,
       text: 'unknown',
     };
+    console.log('[shipping final row]', {
+      product_url: productUrl || null,
+      path: 'no_dom_unknown_fallback',
+      shipping: routerRow.shipping,
+    });
+    return;
   }
+  console.log('[shipping final row]', {
+    product_url: productUrl || null,
+    path: 'no_dom_kept_base_shipping',
+    shipping: routerRow.shipping,
+  });
 }
 
 /**
  * PDP: __MODERN_ROUTER_DATA__ → components_map (product_info) → preços (opcional), loja, review_model, variantes.
  * `preco_atual` pode ficar vazio; loja/reviews/variantes vêm quando `product_info` existe.
  * @param {{ maxReviews?: number; maxTextChars?: number; maxPhotosPerReview?: number; maxSkuOffers?: number }} sampleLimits
- * @returns {Promise<{ row: Record<string, unknown> | null; diag: Record<string, unknown>; pdp_sold_dom_candidates: string[]; pdp_sold_raw_texts: string[] }>}
+ * @returns {Promise<{ row: Record<string, unknown> | null; diag: Record<string, unknown>; pdp_sold_dom_candidates: string[]; pdp_sold_raw_texts: string[]; pdp_sold_local_scope: Record<string, unknown> | null }>}
  */
 function extractPdpPricesFromRouter(page, sampleLimits) {
   return page.evaluate((limitsArg) => {
@@ -395,29 +482,65 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
     };
 
     /**
-     * Todos os nós: innerText com "vendido" (cobertura máxima; dedupe por string).
-     * `raw` = lista bruta pré-dedupe; `candidates` = strings únicas para o parser.
+     * Vendidos: só o contentor imediato do título (parent de `h1`). Sem main, body, ascendentes largos, `*` ou página.
+     * Sem match local → listas vazias (não alargar escopo).
      */
     function collectPdpSoldDomData() {
       const MAX_LEN = 32_000;
-      const allTexts = Array.from(document.querySelectorAll('*'))
-        .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
-        .filter(Boolean)
-        .filter((text) => text.length <= MAX_LEN)
-        .filter((text) => text.toLowerCase().includes('vendido'));
+      const TAGS = 'span,div,p,strong,a,b,[class*="H3"],[data-e2e]';
+      const titleEl = document.querySelector('h1');
+      if (!titleEl) {
+        return {
+          candidates: /** @type {string[]} */ ([]),
+          raw: /** @type {string[]} */ ([]),
+          localScope: /** @type {Record<string, string>} */ ({ kind: 'none', reason: 'no_h1' }),
+        };
+      }
+      const scope = titleEl.parentElement;
+      if (!scope) {
+        return {
+          candidates: [],
+          raw: [],
+          localScope: { kind: 'none', reason: 'no_parent' },
+        };
+      }
+      const localScope = {
+        kind: 'h1_parent',
+        titleSelector: 'h1',
+        containerTag: scope.tagName || '',
+        containerClass: String(scope.className || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 200),
+        dataE2e: scope.getAttribute('data-e2e') || '',
+      };
       const seen = new Set();
       /** @type {string[]} */
       const cands = [];
-      for (const t of allTexts) {
-        if (seen.has(t)) continue;
-        seen.add(t);
-        cands.push(t);
+      /** @type {string[]} */
+      const raw = [];
+      for (const el of scope.querySelectorAll(TAGS)) {
+        if (!el) continue;
+        const text = (el.innerText != null ? el.innerText : el.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text.length < 4 || text.length > MAX_LEN) continue;
+        if (/\bsale\b/i.test(text)) continue;
+        if (!/vendidos?/i.test(text)) continue;
+        raw.push(text);
+        if (seen.has(text)) continue;
+        seen.add(text);
+        cands.push(text);
       }
-      return { candidates: cands, raw: allTexts };
+      return { candidates: cands, raw, localScope };
     }
     function pdpSoldDomFields() {
       const d = collectPdpSoldDomData();
-      return { pdp_sold_dom_candidates: d.candidates, pdp_sold_raw_texts: d.raw };
+      return {
+        pdp_sold_dom_candidates: d.candidates,
+        pdp_sold_raw_texts: d.raw,
+        pdp_sold_local_scope: d.localScope,
+      };
     }
 
     const el = document.querySelector('script#__MODERN_ROUTER_DATA__');
@@ -679,13 +802,8 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
     );
     diag.has_categories = categorySegments.length > 0;
 
-    let totalVendasStr = '';
-    if (pmModel && typeof pmModel === 'object') {
-      const rawSold = pmModel.sold_count ?? pmModel.soldCount;
-      if (rawSold != null && String(rawSold).trim() !== '') {
-        totalVendasStr = String(rawSold).trim();
-      }
-    }
+    /** Vendidos: nunca a partir de product_model.sold_count / router — só o DOM aplica (applyPdpDomSold). */
+    const totalVendasStr = '';
 
     const ogImg = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
 
@@ -1526,17 +1644,21 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
       diag: routerDiag,
       pdp_sold_dom_candidates: domSoldSniffer,
       pdp_sold_raw_texts: rawSniffer,
+      pdp_sold_local_scope: localScopeSniffer,
     } = await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
     if (routerForEnrich) {
-      const hasDom = Array.isArray(domSoldSniffer) && domSoldSniffer.length > 0;
-      if (hasDom) {
-        applyPdpDomSold(routerForEnrich, domSoldSniffer, {
-          product_url: pUrl,
-          raw_dom_texts: Array.isArray(rawSniffer) ? rawSniffer : [],
-        });
+      const hasRaw = Array.isArray(domSoldSniffer) && domSoldSniffer.length > 0;
+      const soldOk = hasRaw
+        ? applyPdpDomSold(routerForEnrich, domSoldSniffer, {
+            product_url: pUrl,
+            raw_dom_texts: Array.isArray(rawSniffer) ? rawSniffer : [],
+            local_scope: localScopeSniffer,
+          })
+        : null;
+      if (soldOk) {
         await logPdpSoldSelectedElementHtml(page, pUrl, String(routerForEnrich.total_vendas || ''));
       } else {
-        applyPdpRouterSoldFallback(routerForEnrich);
+        applyPdpNoVisibleVendido(routerForEnrich, { product_url: pUrl });
       }
     }
     await mergeDomShippingIntoRouterRow(page, routerForEnrich);
@@ -1563,17 +1685,21 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
     diag: routerDiagPdp,
     pdp_sold_dom_candidates: domSoldPdp,
     pdp_sold_raw_texts: rawPdp,
+    pdp_sold_local_scope: localScopePdp,
   } = await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
   if (routerRow) {
-    const hasDom = Array.isArray(domSoldPdp) && domSoldPdp.length > 0;
-    if (hasDom) {
-      applyPdpDomSold(routerRow, domSoldPdp, {
-        product_url: url,
-        raw_dom_texts: Array.isArray(rawPdp) ? rawPdp : [],
-      });
+    const hasRaw = Array.isArray(domSoldPdp) && domSoldPdp.length > 0;
+    const soldOk = hasRaw
+      ? applyPdpDomSold(routerRow, domSoldPdp, {
+          product_url: url,
+          raw_dom_texts: Array.isArray(rawPdp) ? rawPdp : [],
+          local_scope: localScopePdp,
+        })
+      : null;
+    if (soldOk) {
       await logPdpSoldSelectedElementHtml(page, url, String(routerRow.total_vendas || ''));
     } else {
-      applyPdpRouterSoldFallback(routerRow);
+      applyPdpNoVisibleVendido(routerRow, { product_url: url });
     }
   }
   await mergeDomShippingIntoRouterRow(page, routerRow);
@@ -1675,6 +1801,7 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
       document.querySelector('[data-e2e="product_title"]')?.textContent?.trim() ||
       '';
 
+    // --- Bloco PREÇO (DOM de fallback) — inalterado em relação ao resto; não cruzar com vendidos abaixo ---
     const prices = [];
     document.querySelectorAll('[class*="price" i], [data-e2e*="price" i], strong, span').forEach((el) => {
       const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1683,21 +1810,60 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
     const preco_atual = prices[0] || '';
     const preco_original = prices.length > 1 ? prices[1] : '';
 
-    const MAX_LEN = 32_000;
-    const allSold = Array.from(document.querySelectorAll('*'))
-      .map((el) => (el && el.innerText != null ? String(el.innerText).replace(/\s+/g, ' ').trim() : ''))
-      .filter(Boolean)
-      .filter((text) => text.length <= MAX_LEN)
-      .filter((text) => text.toLowerCase().includes('vendido'));
-    const soldSeen = new Set();
-    /** @type {string[]} */
-    const soldCands = [];
-    for (const t of allSold) {
-      if (soldSeen.has(t)) continue;
-      soldSeen.add(t);
-      soldCands.push(t);
+    /**
+     * Alinhado a `collectPdpSoldDomData` no router: só `h1` + `parentElement`, sem ampliar escopo.
+     */
+    function collectPdpSoldDomData() {
+      const MAX_LEN = 32_000;
+      const TAGS = 'span,div,p,strong,a,b,[class*="H3"],[data-e2e]';
+      const titleEl = document.querySelector('h1');
+      if (!titleEl) {
+        return {
+          candidates: /** @type {string[]} */ ([]),
+          raw: /** @type {string[]} */ ([]),
+          localScope: { kind: 'none', reason: 'no_h1' },
+        };
+      }
+      const scope = titleEl.parentElement;
+      if (!scope) {
+        return { candidates: [], raw: [], localScope: { kind: 'none', reason: 'no_parent' } };
+      }
+      const localScope = {
+        kind: 'h1_parent',
+        titleSelector: 'h1',
+        containerTag: scope.tagName || '',
+        containerClass: String(scope.className || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 200),
+        dataE2e: scope.getAttribute('data-e2e') || '',
+      };
+      const seen = new Set();
+      /** @type {string[]} */
+      const cands = [];
+      /** @type {string[]} */
+      const raw = [];
+      for (const el of scope.querySelectorAll(TAGS)) {
+        if (!el) continue;
+        const text = (el.innerText != null ? el.innerText : el.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text.length < 4 || text.length > MAX_LEN) continue;
+        if (/\bsale\b/i.test(text)) continue;
+        if (!/vendidos?/i.test(text)) continue;
+        raw.push(text);
+        if (seen.has(text)) continue;
+        seen.add(text);
+        cands.push(text);
+      }
+      return { candidates: cands, raw, localScope };
     }
+    const soldD = collectPdpSoldDomData();
+    const soldCands = soldD.candidates;
+    const allSold = soldD.raw;
+    const soldLocalScope = soldD.localScope;
 
+    // --- Bloco RATING (DOM de fallback) — inalterado ---
     let rating = '';
     document.querySelectorAll('[class*="rating" i], [class*="review" i], [aria-label*="star" i]').forEach((el) => {
       const t = (el.textContent || el.getAttribute('aria-label') || '').trim();
@@ -1716,6 +1882,7 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
       preco_original,
       soldCands,
       allSold,
+      soldLocalScope,
       rating,
       img,
     };
@@ -1728,25 +1895,39 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
   console.info('[pdp] source=dom', { sku, url });
 
   const allSold = Array.isArray(dom.allSold) ? dom.allSold : [];
-  const pickDom = pickMaxSoldFromVendidoTexts(Array.isArray(dom.soldCands) ? dom.soldCands : []);
-  console.log('[sold candidates]', pickDom.candidates);
-  console.log('[sold selected]', pickDom.best);
-  console.log('[sold candidates]', {
+  const candsForSold = Array.isArray(dom.soldCands) ? dom.soldCands : [];
+  const scopeInfo = dom.soldLocalScope && typeof dom.soldLocalScope === 'object' ? dom.soldLocalScope : {};
+  const allowedDom = candsForSold.filter((t) => pdpVendidoDomSourceAllowed(t));
+  console.log('[sold local scope]', { product_url: url, .../** @type {Record<string, unknown>} */(scopeInfo) });
+  console.log('[sold dom local texts]', {
     product_url: url,
-    candidates: pickDom.candidates.map((c) => ({ text: c.text, value: c.value })),
+    all_from_scope: candsForSold,
+    allowed_from_scope: allowedDom,
+    raw_node_texts: allSold,
   });
-  console.log('[sold selected]', { product_url: url, selected: pickDom.best });
-  console.log('[sold raw texts]', { product_url: url, texts: allSold });
-  const stDom = String(pickDom.winningText || '').trim();
-  const pscDomN = pickDom.count;
-  console.log('[sold source]', {
-    source: stDom ? 'pdp_dom' : 'none',
-    dom_text: stDom || null,
-    parsed_value: pscDomN,
-    router_value: null,
-  });
+  const pickDom = pickMaxSoldFromVendidoTexts(allowedDom);
+  const stDom =
+    pickDom.count != null &&
+    Number.isFinite(pickDom.count) &&
+    String(pickDom.winningText || '').trim() &&
+    pdpVendidoDomSourceAllowed(pickDom.winningText)
+      ? String(pickDom.winningText).trim()
+      : '';
+  const pscDomN = stDom ? pickDom.count : null;
+  if (stDom) {
+    console.log('[sold dom selected]', { product_url: url, text: stDom, count: pscDomN });
+  } else {
+    const hadRouterT = String(routerRow?.total_vendas ?? '').trim();
+    const hadRouterN = routerRow?.product_sold_count;
+    console.log('[sold blocked non-visible source]', {
+      product_url: url,
+      had_router_text: hadRouterT,
+      had_router_count: hadRouterN,
+      note: 'sem frase "vendido(s)" aprovada no h1_parent; sem fallback router',
+    });
+  }
   await logPdpSoldSelectedElementHtml(page, url, stDom);
-
+  const soldSourceOut = stDom ? 'pdp_dom' : 'pdp_no_visible_vendido';
   return {
     sku,
     nome: dom.title,
@@ -1758,7 +1939,7 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
     sold_text: stDom,
     sold_count: pscDomN,
     sold_from_pdp_dom: Boolean(stDom),
-    sold_source: stDom ? 'pdp_dom' : 'none',
+    sold_source: soldSourceOut,
     taxonomia: taxonomiaMerged,
     link_do_produto: url,
     link_imagem: dom.img,

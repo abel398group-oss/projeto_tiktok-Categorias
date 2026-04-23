@@ -1,6 +1,6 @@
 /**
  * Extrai produtos visíveis no dashboard de uma categoria master.
- * 1) DOM do cartão (vitrine) — preço, “de” riscado, %, frete, vendidos como na tela.
+ * 1) DOM do cartão (vitrine) — preço, “de” riscado, %, vendidos como na tela (linhas de frete ignoradas no cálculo de preço).
  * 2) __MODERN_ROUTER_DATA__ — preenche campos em falta (imagem, loja, ratings, etc.).
  * 3) Se não houver cartões com âncora: só SSR. Se SSR falhar, DOM parcial.
  */
@@ -188,8 +188,51 @@ export async function extractDashboardProductsFromSsr(page) {
       function num(v) {
         return parseMoneyToNumber(v);
       }
+      /**
+       * Preço “apresentado” na vitrine: NÃO começar por discount_price* (cupom / outro degrau que a UI
+       * nem mostra como principal — ex. 192,99 vs 197,99 no ecrã).
+       */
+      function firstNonNullNumber(/** @type {unknown[]} */ vals) {
+        for (const v of vals) {
+          const x = num(v);
+          if (x != null) return x;
+        }
+        return null;
+      }
+      function fromPpiBlock(/** @type {Record<string, unknown>} */ o) {
+        const min = o.min_price ?? o.minPrice;
+        if (min && typeof min === 'object') {
+          const m = /** @type {Record<string, unknown>} */ (min);
+          const fromMin = firstNonNullNumber([
+            m.real_time_price,
+            m.real_time_sale_price,
+            m.real_price_decimal,
+            m.real_price,
+            m.sale_price_decimal,
+            m.single_product_price_decimal,
+            m.min_sale_price,
+            m.price_val,
+          ]);
+          if (fromMin != null) return fromMin;
+        }
+        return firstNonNullNumber([
+          o.real_time_price,
+          o.price_current,
+          o.show_price,
+          o.format_price,
+          o.sale_price_format,
+          o.format_discount_price,
+          o.sale_price_integer_part_format,
+          o.price_text,
+          o.sale_price_decimal,
+          o.sale_price,
+          o.price,
+          o.discount_price,
+          o.discount_price_decimal,
+        ]);
+      }
       const p = ppi && typeof ppi === 'object' ? /** @type {Record<string, unknown>} */ (ppi) : null;
-      const r = root && typeof root === 'object' ? root : null;
+      const r = root && typeof root === 'object' ? /** @type {Record<string, unknown>} */ (root) : null;
       if (!p && !r) return 0;
       const pBase = r
         ? (r.product_base && typeof r.product_base === 'object' ? r.product_base : r.productBase)
@@ -203,49 +246,33 @@ export async function extractDashboardProductsFromSsr(page) {
       /** @type {number | null} */
       let n = null;
       if (p) {
-        n = num(p.discount_price_decimal) || num(p.discount_price);
-        if (n != null) return n;
-        n = num(p.real_time_price);
-        if (n != null) return n;
-        n = num(p.sale_price_format) || num(p.format_discount_price) || num(p.sale_price_integer_part_format);
-        if (n != null) return n;
-        n = num(p.price_current) || num(p.show_price) || num(p.format_price) || num(p.price_text);
+        n = fromPpiBlock(p);
         if (n != null) return n;
       }
       if (r) {
-        n = num(r.discount_price) || num(r.sale_price) || num(r.min_sale_price);
-        if (n != null) return n;
-        n = num(r.real_time_price);
-        if (n != null) return n;
-        n = num(r.price_current) || num(r.display_price) || num(r.current_price) || num(r.price);
+        n = firstNonNullNumber([
+          r.real_time_price,
+          r.price_current,
+          r.display_price,
+          r.current_price,
+          r.min_sale_price,
+          r.sale_price,
+          r.price,
+          r.discount_price,
+        ]);
         if (n != null) return n;
       }
       if (priceB) {
-        n =
-          num(priceB.discount_price) ||
-          num(priceB.sale_price) ||
-          num(priceB.real_price) ||
-          num(priceB.current_price) ||
-          num(priceB.min_sku_price);
+        n = firstNonNullNumber([
+          priceB.real_price,
+          priceB.current_price,
+          priceB.sale_price,
+          priceB.min_sku_price,
+          priceB.discount_price,
+        ]);
         if (n != null) return n;
       }
       if (p) {
-        const min = p.min_price ?? p.minPrice;
-        if (min && typeof min === 'object') {
-          const m = /** @type {Record<string, unknown>} */ (min);
-          n =
-            num(m.real_time_price) ||
-            num(m.real_time_sale_price) ||
-            num(m.real_price_decimal) ||
-            num(m.real_price) ||
-            num(m.sale_price_decimal) ||
-            num(m.single_product_price_decimal) ||
-            num(m.min_sale_price) ||
-            num(m.price_val);
-          if (n != null) return n;
-        }
-        n = num(p.sale_price_decimal) || num(p.sale_price) || num(p.price);
-        if (n != null) return n;
         n = num(p.sale_price_format) || num(p.price_text);
         if (n != null) return n;
       }
@@ -877,368 +904,8 @@ export async function extractDashboardProductsFromSsr(page) {
       return { rating: null, rating_count: null, rating_distribution: null };
     }
 
-    function realPriceDescImpliesFree(rawText) {
-      const s = String(rawText ?? '')
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
-      return (
-        s.includes('gratis') ||
-        s.includes('free') ||
-        s.includes('sem frete') ||
-        s.includes('envio gratis')
-      );
-    }
-
-    function shippingLabelLooksFree(rawLabel) {
-      const s = String(rawLabel ?? '')
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
-      return (
-        s.includes('free') ||
-        s.includes('gratis') ||
-        s.includes('sem frete') ||
-        s.includes('envio gratis')
-      );
-    }
-
     /**
-     * @param {Record<string, unknown> | null | undefined} pinfoObj
-     */
-    function collectLogisticListsFromPinfo(pinfoObj) {
-      if (!pinfoObj || typeof pinfoObj !== 'object') return [];
-      const pi = /** @type {Record<string, unknown>} */ (pinfoObj);
-      const keys = [
-        'promotion_logistic_list',
-        'promotionLogisticList',
-        'logistic_list',
-        'logisticList',
-        'logistics_service_list',
-        'logisticsServiceList',
-        'shipping_option_list',
-        'shippingOptionList',
-        'product_logistic_list',
-        'productLogisticList',
-      ];
-      for (const k of keys) {
-        const v = pi[k];
-        if (Array.isArray(v) && v.length) return v;
-      }
-      return [];
-    }
-
-    /**
-     * @param {Record<string, unknown>} pl
-     */
-    function resolveFeeBlock(pl) {
-      let fee = pl.shippingFee ?? pl.shipping_fee;
-      if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
-      const lm = pl.logistic_model ?? pl.logisticModel;
-      if (lm && typeof lm === 'object') {
-        const l = /** @type {Record<string, unknown>} */ (lm);
-        fee = l.shipping_fee ?? l.shippingFee ?? l.fee;
-        if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
-      }
-      const svc = pl.logistic_service ?? pl.logisticService ?? pl.shipping_service ?? pl.shippingService;
-      if (svc && typeof svc === 'object') {
-        const s = /** @type {Record<string, unknown>} */ (svc);
-        fee = s.shipping_fee ?? s.shippingFee ?? s.fee;
-        if (fee && typeof fee === 'object') return /** @type {Record<string, unknown>} */ (fee);
-      }
-      return null;
-    }
-
-    /**
-     * @param {Record<string, unknown> | null} fee
-     */
-    function extractShipTextFromFee(fee) {
-      if (!fee || typeof fee !== 'object') return '';
-      const f = /** @type {Record<string, unknown>} */ (fee);
-      const rd =
-        f.real_price_desc ??
-        f.realPriceDesc ??
-        f.price_desc ??
-        f.priceDesc ??
-        f.fee_desc ??
-        f.display_text ??
-        f.displayText ??
-        '';
-      return String(rd).trim();
-    }
-
-    /**
-     * @param {Record<string, unknown>} pl
-     */
-    function extractEtaHintFromPl(pl) {
-      const lm = pl.logistic_model ?? pl.logisticModel;
-      /** @type {Record<string, unknown>[]} */
-      const nodes = [pl];
-      if (lm && typeof lm === 'object') nodes.push(/** @type {Record<string, unknown>} */ (lm));
-      for (const n of nodes) {
-        const h =
-          n.delivery_eta_text ??
-          n.deliveryEtaText ??
-          n.eta_text ??
-          n.etaText ??
-          n.delivery_time_desc ??
-          n.deliveryTimeDesc ??
-          n.shipping_text ??
-          n.shippingText ??
-          n.lead_time_text ??
-          n.leadTimeText ??
-          '';
-        const s = String(h).trim();
-        if (s) return s;
-      }
-      return '';
-    }
-
-    /**
-     * @param {Record<string, unknown>} pl
-     * @param {{ min: number | null; max: number | null }} dd
-     */
-    function buildShippingFromPlEntry(pl, dd) {
-      const freeRaw = pl.freeShipping ?? pl.free_shipping;
-      const fee = resolveFeeBlock(pl);
-      let shipPrice = 0;
-      let shipText = '';
-      if (fee && typeof fee === 'object') {
-        const ff = /** @type {Record<string, unknown>} */ (fee);
-        const rp = ff.real_price ?? ff.realPrice;
-        if (rp != null && String(rp).trim() !== '') {
-          let n = Number(rp);
-          if (!Number.isFinite(n)) n = parseMoneyToNumber(rp) ?? 0;
-          if (Number.isFinite(n) && n >= 0) shipPrice = n;
-        }
-        shipText = extractShipTextFromFee(fee);
-      }
-      if (!shipText) shipText = extractEtaHintFromPl(pl);
-      const origRaw = pl.originalShippingFee ?? pl.original_shipping_fee;
-      /** @type {number | null} */
-      let originalPrice = null;
-      if (origRaw != null && origRaw !== '') {
-        const n = Number(origRaw);
-        if (Number.isFinite(n)) originalPrice = n;
-      }
-      const delName = pl.deliveryName ?? pl.delivery_name;
-      const et = /** @type {Record<string, unknown> | undefined} */ (pl.event_tracking ?? pl.eventTracking);
-      let shipType = '';
-      if (et && typeof et === 'object') {
-        const st = et.shipping_type ?? et.shippingType;
-        if (st != null) shipType = String(st).trim();
-      }
-      let isFree = freeRaw === true || freeRaw === 1 || freeRaw === '1';
-      if (!isFree && shipPrice === 0 && shipText && realPriceDescImpliesFree(shipText)) isFree = true;
-
-      if (!shipText || shipText === 'unknown') {
-        if (freeRaw === true || freeRaw === 1 || freeRaw === '1' || isFree) {
-          shipText = 'Frete grátis';
-          isFree = true;
-        } else if (shipPrice > 0) {
-          shipText = `R$ ${shipPrice.toFixed(2).replace('.', ',')}`;
-        } else {
-          shipText = 'unknown';
-        }
-      }
-
-      return {
-        price: isFree ? 0 : shipPrice,
-        is_free: isFree,
-        text: shipText,
-        original_price: originalPrice,
-        delivery_name: delName != null ? String(delName).trim() : '',
-        shipping_type: shipType,
-        delivery_min_days: dd.min,
-        delivery_max_days: dd.max,
-      };
-    }
-
-    /**
-     * @param {Record<string, unknown> | null | undefined} pinfoObj
-     */
-    function extractPinfoShippingHint(pinfoObj) {
-      if (!pinfoObj || typeof pinfoObj !== 'object') return '';
-      const pi = /** @type {Record<string, unknown>} */ (pinfoObj);
-      const keys = [
-        'shipping_summary',
-        'shippingSummary',
-        'delivery_text',
-        'deliveryText',
-        'logistic_text',
-        'logisticText',
-      ];
-      for (const k of keys) {
-        const v = pi[k];
-        if (v != null && String(v).trim()) return String(v).trim();
-      }
-      return '';
-    }
-
-    /**
-     * @returns {{ price: number; is_free: boolean; text: string; original_price: number | null; delivery_name: string; shipping_type: string; delivery_min_days: number | null; delivery_max_days: number | null }}
-     */
-    function defaultShippingUnknown() {
-      return {
-        price: 0,
-        is_free: false,
-        text: 'unknown',
-        original_price: null,
-        delivery_name: '',
-        shipping_type: '',
-        delivery_min_days: null,
-        delivery_max_days: null,
-      };
-    }
-
-    /**
-     * Frete: “Frete grátis” em labels; valor em listas logísticas; fallback texto em product_*.
-     * @param {Record<string, unknown>} p
-     */
-    function shippingFromProduct(p) {
-      const mkt = p.product_marketing_info || p.productMarketingInfo;
-      if (mkt && typeof mkt === 'object') {
-        const mk = /** @type {Record<string, unknown>} */ (mkt);
-        const labels = mk.shipping_labels || mk.shippingLabels;
-        if (Array.isArray(labels) && labels.some((l) => shippingLabelLooksFree(l))) {
-          return {
-            price: 0,
-            is_free: true,
-            text: 'Frete grátis',
-            original_price: null,
-            delivery_name: '',
-            shipping_type: '',
-            delivery_min_days: null,
-            delivery_max_days: null,
-          };
-        }
-        if (Array.isArray(labels) && labels.length) {
-          const t = labels.map((x) => String(x).trim()).filter(Boolean).join(' · ').slice(0, 200);
-          if (t) {
-            if (realPriceDescImpliesFree(t)) {
-              return {
-                price: 0,
-                is_free: true,
-                text: 'Frete grátis',
-                original_price: null,
-                delivery_name: '',
-                shipping_type: '',
-                delivery_min_days: null,
-                delivery_max_days: null,
-              };
-            }
-            const money = t.match(/R\$\s*[\d.,]+/i);
-            const pr = money ? parseMoneyToNumber(money[0]) : null;
-            if (pr != null && pr > 0) {
-              return {
-                price: pr,
-                is_free: false,
-                text: t,
-                original_price: null,
-                delivery_name: '',
-                shipping_type: '',
-                delivery_min_days: null,
-                delivery_max_days: null,
-              };
-            }
-          }
-        }
-      }
-
-      const emptyDd = { min: /** @type {number | null} */ (null), max: /** @type {number | null} */ (null) };
-      /** @type {Record<string, unknown>[]} */
-      const pinfoSources = [];
-      if (p.product_info && typeof p.product_info === 'object') {
-        pinfoSources.push(/** @type {Record<string, unknown>} */ (p.product_info));
-      }
-      if (p.productInfo && typeof p.productInfo === 'object') {
-        pinfoSources.push(/** @type {Record<string, unknown>} */ (p.productInfo));
-      }
-      const ppi = p.product_price_info ?? p.productPriceInfo;
-      if (ppi && typeof ppi === 'object') {
-        pinfoSources.push(/** @type {Record<string, unknown>} */ (ppi));
-      }
-      pinfoSources.push(p);
-
-      for (const pinfo of pinfoSources) {
-        const entries = collectLogisticListsFromPinfo(pinfo);
-        for (const e of entries) {
-          if (!e || typeof e !== 'object') continue;
-          const built = buildShippingFromPlEntry(/** @type {Record<string, unknown>} */ (e), emptyDd);
-          if (built.text && built.text !== 'unknown') return built;
-          if (!built.is_free && built.price > 0) return built;
-        }
-      }
-
-      for (const pinfo of pinfoSources) {
-        const hint = extractPinfoShippingHint(pinfo);
-        if (hint) {
-          const isFree = realPriceDescImpliesFree(hint);
-          const hm = hint.match(/R\$\s*[\d.,]+/i);
-          const prFromHint = hm ? parseMoneyToNumber(hm[0]) : null;
-          return {
-            price: isFree ? 0 : prFromHint != null && prFromHint > 0 ? prFromHint : 0,
-            is_free: isFree,
-            text: hint,
-            original_price: null,
-            delivery_name: '',
-            shipping_type: '',
-            delivery_min_days: null,
-            delivery_max_days: null,
-          };
-        }
-      }
-
-      return defaultShippingUnknown();
-    }
-
-    /**
-     * Tenta ler linha “Frete …” no cartão (listagem) quando o JSON não traz logística.
-     * @param {Element} anchor
-     */
-    function shippingTextFromDomNearProduct(anchor) {
-      let el = /** @type {HTMLElement | null} */ (anchor);
-      for (let up = 0; up < 12 && el; up++) {
-        const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
-        const m = block.match(/Frete[^\n]{0,120}/i);
-        if (m) {
-          const line = m[0].replace(/\s+/g, ' ').trim().slice(0, 200);
-          if (realPriceDescImpliesFree(line) || /gr[aá]tis/i.test(line)) {
-            return {
-              price: 0,
-              is_free: true,
-              text: 'Frete grátis',
-              original_price: null,
-              delivery_name: '',
-              shipping_type: '',
-              delivery_min_days: null,
-              delivery_max_days: null,
-            };
-          }
-          const pm = line.match(/R\$\s*[\d.,]+/i);
-          if (pm) {
-            const n = parseMoneyToNumber(pm[0]);
-            if (n != null && n > 0) {
-              return {
-                price: n,
-                is_free: false,
-                text: line,
-                original_price: null,
-                delivery_name: '',
-                shipping_type: '',
-                delivery_min_days: null,
-                delivery_max_days: null,
-              };
-            }
-          }
-        }
-        el = el.parentElement;
-      }
-      return null;
-    }
-
-    /**
-     * Nó mínimo que engloba preço + resto do cartão.
+     * Contentor do cartão (preço + texto do bloco). Usado pelo bloco PREÇO / vendidos / nome.
      * @param {HTMLElement} anchor
      * @returns {HTMLElement}
      */
@@ -1274,11 +941,32 @@ export async function extractDashboardProductsFromSsr(page) {
     }
 
     /**
+     * Remove linhas de parcelamento (“10x R$…”) que geram R$ a mais (parcela) no conjunto.
+     * @param {string} full
+     */
+    function stripInstallmentNoise(/** @type {string} */ full) {
+      return full
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((L) => {
+          if (!L) return true;
+          if (/\b\d{1,2}\s*x\s*R\$\s*[\d.,]+/i.test(L)) return false;
+          if (/\bparcela(s)?\b/i.test(L) && /R\$\s*[\d.,]+/i.test(L)) return false;
+          if (/\b(cashback|bônus|bonus)\b/i.test(L) && /R\$\s*[\d.,]+/i.test(L)) return false;
+          return true;
+        })
+        .join('\n');
+    }
+
+    /**
+     * Bloco PREÇO (DOM): atual, “de” riscado e %; `stripFretePortions` só remove linhas de frete do texto usado para dinheiro.
      * @param {HTMLElement} card
      * @returns {{ price_current: number; price_original: number | null; discount_percent: number | null }}
      */
     function parseCardVisualFinancials(/** @type {HTMLElement} */ card) {
-      const forMoney = stripFretePortions(card.innerText || card.textContent || '');
+      const forMoney = stripInstallmentNoise(
+        stripFretePortions(card.innerText || card.textContent || '')
+      );
       let price_original = null;
       const strikeSel = 's, del, [class*="line-through"], [class*="strikethrough"], [class*="lineThrough"]';
       card.querySelectorAll(strikeSel).forEach((node) => {
@@ -1362,7 +1050,7 @@ export async function extractDashboardProductsFromSsr(page) {
     function soldFromCardBlock(/** @type {string} */ block) {
       const b = block.replace(/\s+/g, ' ');
       const re =
-        /([\d.,]+[KkMmBb]?)\s*\+?\s*(?:vendidos?(?:\([^)]*\))?|vendidas?|sales?|sold)\b/i;
+        /([\d.,]+[KkMmBb]?)\s*\+?\s*(?:vendidos?(?:\([^)]*\))?|vendidas?|\bsold\b)\b/i;
       const m1 = b.match(re);
       if (m1 && m1.index != null) {
         let sold_text = b.slice(m1.index, m1.index + m1[0].length).trim();
@@ -1371,7 +1059,7 @@ export async function extractDashboardProductsFromSsr(page) {
           parseSoldCountFromDisplayText(m1[1]) ?? parseSoldCountFromDisplayText(sold_text);
         return { sold_text, sold_count };
       }
-      const re2 = /\b(?:vendidos?|vendidas?|sales?|sold)\s*[:·\-]?\s*([\d.,]+[KkMmBb]?)/i;
+      const re2 = /\b(?:vendidos?|vendidas?|\bsold\b)\s*[:·\-]?\s*([\d.,]+[KkMmBb]?)/i;
       const m2 = b.match(re2);
       if (m2) {
         let sold_text = clipSoldTextToVendorPhrase(m2[0].trim());
@@ -1380,18 +1068,6 @@ export async function extractDashboardProductsFromSsr(page) {
         return { sold_text, sold_count };
       }
       return { sold_text: '', sold_count: null };
-    }
-
-    /**
-     * @param {Record<string, unknown>} s
-     */
-    function isShippingMeaningfulForMerge(s) {
-      if (!s || typeof s !== 'object') return false;
-      if (s.is_free === true) return true;
-      if (typeof s.price === 'number' && s.price > 0) return true;
-      const t = String(s.text ?? '');
-      if (t && t !== 'unknown') return true;
-      return false;
     }
 
     /**
@@ -1409,27 +1085,51 @@ export async function extractDashboardProductsFromSsr(page) {
       o.name = String((dom.name && String(dom.name).trim()) || s.name);
       if (typeof dom.price_current === 'number' && isFinite(dom.price_current) && dom.price_current > 0) {
         o.price_current = dom.price_current;
-      }
-      o.price_original =
-        dom.price_original != null && typeof dom.price_original === 'number' && dom.price_original > 0
-          ? dom.price_original
-          : s.price_original;
-      o.discount_percent =
-        dom.discount_percent != null && typeof dom.discount_percent === 'number'
-          ? dom.discount_percent
-          : s.discount_percent;
-      const ds = /** @type {Record<string, unknown> | null} */ (
-        dom.shipping && typeof dom.shipping === 'object' ? dom.shipping : null
-      );
-      if (ds && isShippingMeaningfulForMerge(ds)) {
-        o.shipping = dom.shipping;
+        o.price_original =
+          dom.price_original != null && typeof dom.price_original === 'number' && dom.price_original > 0
+            ? dom.price_original
+            : null;
+        if (
+          o.price_original != null &&
+          o.price_original > 0 &&
+          o.price_current > 0 &&
+          o.price_original > o.price_current
+        ) {
+          o.discount_percent =
+            dom.discount_percent != null && typeof dom.discount_percent === 'number'
+              ? dom.discount_percent
+              : Math.max(
+                  0,
+                  Math.min(100, Math.round(100 * (1 - o.price_current / o.price_original)))
+                );
+        } else {
+          o.discount_percent =
+            dom.discount_percent != null && typeof dom.discount_percent === 'number'
+              ? dom.discount_percent
+              : null;
+        }
       } else {
-        o.shipping = s.shipping;
+        o.price_original =
+          dom.price_original != null && typeof dom.price_original === 'number' && dom.price_original > 0
+            ? dom.price_original
+            : s.price_original;
+        o.discount_percent =
+          dom.discount_percent != null && typeof dom.discount_percent === 'number'
+            ? dom.discount_percent
+            : s.discount_percent;
       }
       o.sold_text = String(
         (dom.sold_text && String(dom.sold_text).trim().length) ? dom.sold_text : s.sold_text
       );
-      o.sold_count = dom.sold_count != null ? dom.sold_count : s.sold_count;
+      {
+        const stDom0 = (dom.sold_text && String(dom.sold_text).trim().length) ? String(dom.sold_text).trim() : '';
+        o.sold_count =
+          dom.sold_count != null
+            ? dom.sold_count
+            : stDom0
+              ? null
+              : s.sold_count;
+      }
       o.image_main = String((dom.image_main && String(dom.image_main)) || s.image_main);
       o.shop_name = String((dom.shop_name && String(dom.shop_name).trim()) || s.shop_name);
       o.rating = dom.rating != null && typeof dom.rating === 'number' ? dom.rating : s.rating;
@@ -1447,13 +1147,13 @@ export async function extractDashboardProductsFromSsr(page) {
       let el = /** @type {HTMLElement | null} */ (anchor);
       for (let up = 0; up < 12 && el; up++) {
         const block = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
-        const re = /[\d.,]+[KkMmBb]?\s*\+?\s*(sold|vendidos?|vendidas?|sales?)/i;
+        const re = /[\d.,]+[KkMmBb]?\s*\+?\s*(?:\bsold\b|vendidos?|vendidas?)\b/i;
         const m = block.match(re);
         if (m && m.index !== undefined) {
           const from = Math.max(0, m.index);
           return clipSoldTextToVendorPhrase(block.slice(from, from + m[0].length).trim());
         }
-        const m2 = block.match(/(sold|vendidos?|vendidas?)\s*[:·\-]?\s*[\d.,]+[KkMmBb]?/i);
+        const m2 = block.match(/(?:\bsold\b|vendidos?|vendidas?)\s*[:·\-]?\s*[\d.,]+[KkMmBb]?/i);
         if (m2) return clipSoldTextToVendorPhrase(m2[0].trim());
         el = el.parentElement;
       }
@@ -1486,10 +1186,25 @@ export async function extractDashboardProductsFromSsr(page) {
         if (seen.has(id)) continue;
         seen.add(id);
         const productUrl = regionalPdpUrl(id);
+        // --- Bloco cartão (âncora → contentor): preço / vendidos / título ---
         const card = getCardContainer(elA);
+        // --- Bloco PREÇO (DOM) ---
         const fin = parseCardVisualFinancials(card);
+        // --- Bloco VENDIDOS: preferir a zona “Vendido por … / sold by …” (evita 1,7K global no topo) ---
         const cardText = (card.innerText || card.textContent || '').replace(/\s+/g, ' ');
-        const soldBlock = soldFromCardBlock(cardText);
+        let soldRegion = cardText;
+        const partsV = cardText.split(/\bvendido\s*por\b/i);
+        if (partsV.length > 1) {
+          const t = partsV.slice(1).join(' ').trim();
+          if (t.length > 6) soldRegion = t.slice(0, 1200);
+        } else {
+          const partsE = cardText.split(/\bsold\s*by\b/i);
+          if (partsE.length > 1) {
+            const t = partsE.slice(1).join(' ').trim();
+            if (t.length > 6) soldRegion = t.slice(0, 1200);
+          }
+        }
+        const soldBlock = soldFromCardBlock(soldRegion);
         const soldText =
           soldBlock.sold_text || soldTextFromDomNearProduct(elA);
         const soldCount =
@@ -1498,7 +1213,7 @@ export async function extractDashboardProductsFromSsr(page) {
             : soldText
               ? parseSoldCountFromDisplayText(soldText)
               : null;
-        const shipDom = shippingTextFromDomNearProduct(elA);
+        // --- Bloco AVALIAÇÕES (DOM) ---
         const ratDom = ratingFromDomNearProduct(elA);
         let name = (
           elA.getAttribute('aria-label') ||
@@ -1544,7 +1259,6 @@ export async function extractDashboardProductsFromSsr(page) {
           price_current: fin.price_current,
           price_original: fin.price_original,
           discount_percent: fin.discount_percent,
-          shipping: shipDom || defaultShippingUnknown(),
           rating: ratDom.rating,
           rating_count: ratDom.rating_count,
           rating_distribution: ratDom.rating_distribution,
@@ -1656,7 +1370,6 @@ export async function extractDashboardProductsFromSsr(page) {
           ),
           price_original: extras.price_original,
           discount_percent: extras.discount_percent,
-          shipping: shippingFromProduct(p),
           rating: rat.rating,
           rating_count: rat.rating_count,
           rating_distribution: rat.rating_distribution,

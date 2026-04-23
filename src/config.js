@@ -214,4 +214,16 @@ export const config = {
     const n = Number(v);
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null;
   })(),
+  /**
+   * Teto de produtos no ficheiro do master-snapshot (todas as categorias somadas).
+   * Default 10 (validação); `0` = sem teto. Defina no .env para produção (ex. 0 ou 5000).
+   */
+  masterSnapshotMaxProducts: (() => {
+    const v = process.env.MASTER_SNAPSHOT_MAX_PRODUCTS;
+    if (v === undefined || String(v).trim() === '') return 10;
+    const n = Number(String(v).trim());
+    if (!Number.isFinite(n)) return 10;
+    if (n === 0) return null;
+    return n >= 1 ? Math.floor(n) : 10;
+  })(),
 };
