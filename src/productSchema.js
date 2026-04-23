@@ -493,7 +493,13 @@ export function fromLegacyRow(row) {
     price_original: priceO > 0 ? priceO : null,
     discount,
     rating: num(row.nota_avaliacao),
-    sales_count: num(String(row.total_vendas || '').replace(/[^\d.]/g, '')),
+    sales_count: (() => {
+      const psc = row.product_sold_count;
+      if (psc != null && Number.isFinite(Number(psc))) {
+        return Math.max(0, Math.floor(Number(psc)));
+      }
+      return num(String(row.total_vendas || '').replace(/[^\d.]/g, ''));
+    })(),
     taxonomy_path: taxoStr,
     url: link,
     images: imgs,

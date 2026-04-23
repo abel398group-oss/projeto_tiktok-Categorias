@@ -11,6 +11,7 @@ import { config } from './config.js';
 import { launchBrowser } from './browser.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
 import { sleep } from './util.js';
+import { parseSoldCountFromDisplayText } from './soldParse.js';
 
 const SAMPLE_N = Math.min(25, Math.max(1, Number(process.env.VERIFY_SAMPLE_N) || 10));
 const JSON_PATH = path.resolve(config.masterSnapshotOutputJson);
@@ -55,33 +56,6 @@ function parseBrMoneyFromString(pdpText) {
 }
 
 /**
- * @param {string} text
- */
-function parseSoldFromPdpText(text) {
-  const t = text.replace(/\s+/g, ' ');
-  const m1 = t.match(/(?:^|[^\d])([\d.,]+[KkMm]?)\s*\+?\s*vendidos?(?:\([^)]*\))?\b/i);
-  if (m1) {
-    const p = m1[1].replace(/\./g, '').replace(',', '.');
-    const n = parseFloat(p);
-    if (/\d+,\d+K/i.test(m1[0] + m1[1])) {
-      const km = t.match(/([\d.,]+)\s*([Kk])\s*vendido/i);
-      if (km) {
-        const v = parseFloat(km[1].replace(/\./g, '').replace(',', '.'));
-        return km[2].toLowerCase() === 'k' ? Math.floor(v * 1000) : Math.floor(v);
-      }
-    }
-    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
-  }
-  const m2 = t.match(/\bvendidos?(?:\([^)]*\))?\s*[:·\-]?\s*([\d.,]+[KkMm]?)/i);
-  if (m2) {
-    const p = m2[1].replace(/[^\d.]/g, '');
-    const n = parseInt(p, 10);
-    if (Number.isFinite(n)) return n;
-  }
-  return null;
-}
-
-/**
  * @param {import('puppeteer').Page} page
  */
 async function extractPdpSnapshot(page) {
@@ -96,7 +70,26 @@ async function extractPdpSnapshot(page) {
           .replace(/\s+/g, ' ')
           .trim()
       : '';
-    return { text: text.slice(0, 12_000), title: title.replace(/\s+/g, ' ').trim().slice(0, 500), shop };
+    /** @type {string | null} */
+    let domSold = null;
+    const cands = [];
+    document
+      .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"]')
+      .forEach((el) => {
+        const raw = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!raw || raw.length > 120) return;
+        if (/\bvendido/i.test(raw)) cands.push(raw);
+      });
+    if (cands.length) {
+      cands.sort((a, b) => b.length - a.length);
+      domSold = cands[0];
+    }
+    return {
+      text: text.slice(0, 12_000),
+      title: title.replace(/\s+/g, ' ').trim().slice(0, 500),
+      shop,
+      dom_sold_text: domSold,
+    };
   });
 }
 
@@ -192,13 +185,17 @@ async function main() {
         const pdp = parseBrMoneyFromString(fullText);
         const pdpTitle = String(snap.title || '');
         const pdpShop = String(snap.shop || '');
-        const pdpSold = parseSoldFromPdpText(fullText);
+        const domSold = snap.dom_sold_text != null ? String(snap.dom_sold_text) : '';
+        const soldSource = domSold && domSold.trim() ? domSold : fullText;
+        const pdpSold = parseSoldCountFromDisplayText(soldSource);
+        console.log('[sold debug]', { dom_text: domSold || soldSource.slice(0, 80), parsed_value: pdpSold });
 
         row.pdp = {
           title: pdpTitle.slice(0, 100),
           price_inferred: pdp.current,
           price_alt_max: pdp.original,
           shop: pdpShop.slice(0, 40),
+          sold_text_dom: domSold || null,
           sold_parsed: pdpSold,
         };
 

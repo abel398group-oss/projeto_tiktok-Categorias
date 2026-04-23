@@ -8,6 +8,7 @@ import {
   normalizeShippingEntry,
 } from './shippingExtract.js';
 import { waitIfCaptchaBlocking } from './captchaWait.js';
+import { parseSoldCountFromDisplayText } from './soldParse.js';
 
 /** Limites para extração no router PDP (passados ao `page.evaluate`). */
 function pdpRouterEvaluateLimits() {
@@ -165,6 +166,10 @@ function enrichLegacyRowFromRouter(best, routerRow) {
       /* ignorar */
     }
   }
+  const psc = routerRow.product_sold_count;
+  if (psc != null && Number.isFinite(Number(psc))) {
+    best.product_sold_count = Math.floor(Number(psc));
+  }
 }
 
 /**
@@ -172,6 +177,22 @@ function enrichLegacyRowFromRouter(best, routerRow) {
  * @param {import('puppeteer').Page} page
  * @param {Record<string, unknown> | null} routerRow
  */
+/**
+ * Vendas (PDP): se o DOM tiver linha "… vendido(s)", prevalece sobre o router/SSR.
+ * @param {Record<string, unknown> | null} row
+ * @param {string | null | undefined} pdp_sold_dom_text
+ */
+function applyPdpDomSold(row, pdp_sold_dom_text) {
+  if (!row || typeof row !== 'object') return;
+  if (pdp_sold_dom_text == null) return;
+  const t = String(pdp_sold_dom_text).trim();
+  if (!t) return;
+  const n = parseSoldCountFromDisplayText(t);
+  console.log('[sold debug]', { dom_text: t, parsed_value: n });
+  row.total_vendas = t;
+  if (n != null) row.product_sold_count = n;
+}
+
 async function mergeDomShippingIntoRouterRow(page, routerRow) {
   if (!routerRow || typeof routerRow !== 'object') return;
   const sh = routerRow.shipping;
@@ -231,8 +252,28 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       product_id: '',
     };
 
+    /**
+     * Texto visível "… vendido(s)" na PDP (classes tipo H3-Regular no TikTok).
+     */
+    function collectPdpSoldDomText() {
+      /** @type {string[]} */
+      const cands = [];
+      document
+        .querySelectorAll('span, div, p, strong, a, b, [class*="H3-"], [class*="H2-"], [class*="H4-"]')
+        .forEach((n) => {
+          const raw = (n.innerText || n.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!raw || raw.length > 120) return;
+          if (/\bvendido/i.test(raw)) cands.push(raw);
+        });
+      if (!cands.length) return null;
+      cands.sort((a, b) => b.length - a.length);
+      return cands[0];
+    }
+
     const el = document.querySelector('script#__MODERN_ROUTER_DATA__');
-    if (!el?.textContent?.trim()) return { row: null, diag };
+    if (!el?.textContent?.trim()) {
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
+    }
     diag.found_modern_script = true;
 
     let router;
@@ -240,10 +281,12 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       router = JSON.parse(el.textContent);
       diag.parsed_json = true;
     } catch {
-      return { row: null, diag };
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
     }
     const ld = router.loaderData;
-    if (!ld || typeof ld !== 'object') return { row: null, diag };
+    if (!ld || typeof ld !== 'object') {
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
+    }
     diag.found_loader_data = true;
 
     let pageConfig = null;
@@ -254,7 +297,9 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
         break;
       }
     }
-    if (!pageConfig?.components_map) return { row: null, diag };
+    if (!pageConfig?.components_map) {
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
+    }
     diag.found_components_map = true;
 
     for (const v of Object.values(pageConfig.components_map)) {
@@ -279,13 +324,17 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
         }
       }
     }
-    if (!comp?.component_data) return { row: null, diag };
+    if (!comp?.component_data) {
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
+    }
 
     const cd = /** @type {Record<string, unknown>} */ (comp.component_data);
     const pinfo = /** @type {Record<string, unknown> | undefined} */ (
       cd.product_info ?? cd.productInfo
     );
-    if (!pinfo || typeof pinfo !== 'object') return { row: null, diag };
+    if (!pinfo || typeof pinfo !== 'object') {
+      return { row: null, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
+    }
     diag.found_product_info = true;
 
     function dedupeConsecutiveParts(parts) {
@@ -1247,7 +1296,7 @@ function extractPdpPricesFromRouter(page, sampleLimits) {
       product_properties: productPropertiesStructured,
       sku_offers: skuOffers,
     };
-    return { row, diag };
+    return { row, diag, pdp_sold_dom_text: collectPdpSoldDomText() };
   }, sampleLimits);
 }
 
@@ -1319,10 +1368,9 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
       sku: best.sku,
       url: page.url().split('#')[0],
     });
-    const { row: routerForEnrich, diag: routerDiag } = await extractPdpPricesFromRouter(
-      page,
-      pdpRouterEvaluateLimits()
-    );
+    const { row: routerForEnrich, diag: routerDiag, pdp_sold_dom_text: domSoldSniffer } =
+      await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
+    applyPdpDomSold(routerForEnrich, domSoldSniffer);
     await mergeDomShippingIntoRouterRow(page, routerForEnrich);
     logPdpRouterSnifferDiag(routerDiag, String(best.sku || ''));
     enrichLegacyRowFromRouter(best, routerForEnrich);
@@ -1342,10 +1390,9 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
   const url = page.url().split('#')[0];
   const mHint = url.match(/(\d{10,})/g);
   const urlProductHint = mHint?.length ? mHint[mHint.length - 1] : '';
-  const { row: routerRow, diag: routerDiagPdp } = await extractPdpPricesFromRouter(
-    page,
-    pdpRouterEvaluateLimits()
-  );
+  const { row: routerRow, diag: routerDiagPdp, pdp_sold_dom_text: domSoldPdp } =
+    await extractPdpPricesFromRouter(page, pdpRouterEvaluateLimits());
+  applyPdpDomSold(routerRow, domSoldPdp);
   await mergeDomShippingIntoRouterRow(page, routerRow);
   logPdpRouterSnifferDiag(routerDiagPdp, urlProductHint);
   const taxonomiaMerged = mergePdpTaxonomy(
@@ -1394,6 +1441,10 @@ export async function scrapeProductDetail(page, pdpUrl, taxonomiaFallback, sniff
         rating_count: String(routerRow.rating_count || '').trim(),
         rating_distribution: routerRow.rating_distribution ?? null,
         total_vendas: String(routerRow.total_vendas ?? '').trim(),
+        product_sold_count:
+          routerRow.product_sold_count != null && Number.isFinite(Number(routerRow.product_sold_count))
+            ? Math.floor(Number(routerRow.product_sold_count))
+            : null,
         taxonomia: taxonomiaMerged,
         link_do_produto: url,
         link_imagem: routerRow.link_imagem || '',
